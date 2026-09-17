@@ -114,7 +114,43 @@ def upsert_rows(
     normalized = [{c: r.get(c) for c in columns} for r in rows]
 
     with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(cur, query, normalized, page_size=500)
+        cur.execute("SAVEPOINT upsert_batch")
+        try:
+            psycopg2.extras.execute_batch(cur, query, normalized, page_size=500)
+            cur.execute("RELEASE SAVEPOINT upsert_batch")
+        except psycopg2.Error as exc:
+            # Confirmed live (17 Sep 2026): a single bad row -- e.g. a
+            # foreign key to a player_id that a roster pull missed -- makes
+            # Postgres abort this ENTIRE batch, and without a savepoint it
+            # would poison the whole surrounding transaction (backfill.py
+            # shares one `with get_conn() as conn:` connection across many
+            # upsert_rows calls, sometimes a full season's worth). Rolling
+            # back to this savepoint undoes only this batch, not anything
+            # already written earlier in the same transaction. Retrying
+            # row-by-row (each in its own savepoint) then isolates exactly
+            # which row(s) are bad so the rest of a good batch still lands,
+            # instead of losing all of it over one row.
+            cur.execute("ROLLBACK TO SAVEPOINT upsert_batch")
+            log.warning(
+                "batch upsert into %s.%s failed (%s: %s) -- retrying %d rows one at a time to isolate the bad ones",
+                schema, table, type(exc).__name__, exc, len(normalized),
+            )
+            succeeded = 0
+            for row in normalized:
+                cur.execute("SAVEPOINT upsert_row")
+                try:
+                    cur.execute(query, row)
+                    cur.execute("RELEASE SAVEPOINT upsert_row")
+                    succeeded += 1
+                except psycopg2.Error as row_exc:
+                    cur.execute("ROLLBACK TO SAVEPOINT upsert_row")
+                    key_values = {c: row.get(c) for c in conflict_cols}
+                    log.warning(
+                        "skipped 1 row in %s.%s (conflict key %s): %s",
+                        schema, table, key_values, row_exc,
+                    )
+            log.info("upserted %d/%d rows into %s.%s (after row-by-row fallback)", succeeded, len(rows), schema, table)
+            return succeeded
 
     log.info("upserted %d rows into %s.%s", len(rows), schema, table)
     return len(rows)

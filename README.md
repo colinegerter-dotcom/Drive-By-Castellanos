@@ -175,6 +175,31 @@ change worth deciding on deliberately, not defaulting into).
 comes from the hand-researched CSV, not Savant, and still populates
 normally.
 
+**Also confirmed live, same run:** MLB's `rosterType: fullSeason` (used to
+seed the `players` table from each team's roster) does not reliably return
+every player who shows up elsewhere in a season's data -- a real,
+currently-active starter (not some replacement-level fringe case) was
+missing from every team's roster pull, which broke `games.home_starter_id`'s
+foreign key and rolled back the entire games insert. Root cause
+unconfirmed (a mid-season trade/DFA edge in how the Stats API scopes
+"fullSeason" is the leading guess). Fixed two ways, both in this commit:
+1. `backfill.py` and `daily_pull.py` now pull the schedule first, harvest
+   every probable-starter `player_id` out of it, and pass those into
+   `collect_player_ids_for_season` (`pipelines/reference/players.py`) so
+   they're seeded into `players` before anything references them --
+   fixing the root cause for that one column, not just papering over it.
+2. `db.upsert_rows` (the one function every table write in this repo goes
+   through) now falls back to a row-by-row retry, each in its own SQL
+   savepoint, if a batch insert fails -- so one bad foreign key (an
+   umpire, a lineup player, whatever) logs a warning and gets skipped
+   instead of rolling back potentially a whole season's worth of work in
+   one shared transaction. `game_results.update_game_umpire` (the one
+   write that goes around `upsert_rows` entirely) got the same
+   savepoint treatment directly. This is a safety net, not a fix for the
+   underlying roster-completeness gap -- if it fires, the warning log
+   says exactly which row and column, which is the signal to go add that
+   case the same way #1 does.
+
 **Needs live-API verification (couldn't confirm the exact response shape
 without network access):**
 - `games.national_tv_flag` classification (`pipelines/games/games.py`,

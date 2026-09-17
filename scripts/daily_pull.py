@@ -68,6 +68,22 @@ def run(today: str | None = None):
     yesterday = (datetime.fromisoformat(today).date() - timedelta(days=1)).isoformat()
     season = CURRENT_SEASON
 
+    # Pulled before the DB connection even opens, same reason as
+    # backfill.py's pull_season_games: harvest probable-starter player_ids
+    # from the schedule up front so the players table can be seeded with
+    # them before anything inserts a game row that references one via
+    # foreign key. Confirmed live (17 Sep 2026): the roster pull alone isn't
+    # reliably complete -- see collect_player_ids_for_season's docstring.
+    # Reused below instead of re-pulling the same schedule twice.
+    yesterday_games = build_game_rows(yesterday, yesterday, season=season)
+    today_games = build_game_rows(today, today, season=season)
+    starter_ids = {
+        pid
+        for g in (yesterday_games + today_games)
+        for pid in (g.get("home_starter_id"), g.get("away_starter_id"))
+        if pid
+    }
+
     with get_conn() as conn:
         log.info("refreshing teams/players")
         team_rows = build_team_rows(season)
@@ -82,7 +98,7 @@ def run(today: str | None = None):
                 pid = (entry.get("person") or {}).get("id")
                 if pid:
                     current_team_by_player[pid] = tid
-        player_ids = collect_player_ids_for_season(team_ids, season)
+        player_ids = collect_player_ids_for_season(team_ids, season, extra_ids=starter_ids)
         player_rows = build_player_rows(player_ids, current_team_by_player)
         upsert_rows(conn, "players", player_rows, conflict_cols=["player_id"])
 
@@ -91,7 +107,6 @@ def run(today: str | None = None):
         upsert_rows(conn, "pitches", pitch_rows, conflict_cols=["game_id", "at_bat_id", "pitch_number"])
 
         log.info("processing yesterday's game results (%s)", yesterday)
-        yesterday_games = build_game_rows(yesterday, yesterday, season=season)
         upsert_rows(conn, "games", yesterday_games, conflict_cols=["game_id"])
         coords_cache = _venue_coords_by_name()
         orientation_by_venue = _load_orientation_by_name()
@@ -115,8 +130,7 @@ def run(today: str | None = None):
             if cond_row:
                 upsert_rows(conn, "game_conditions", [cond_row], conflict_cols=["game_id"])
 
-        log.info("pulling today's schedule (%s)", today)
-        today_games = build_game_rows(today, today, season=season)
+        log.info("upserting today's schedule (%s)", today)
         upsert_rows(conn, "games", today_games, conflict_cols=["game_id"])
 
         log.info("computing today's pregame form tables")

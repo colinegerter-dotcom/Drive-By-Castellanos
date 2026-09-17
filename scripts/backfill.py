@@ -58,13 +58,13 @@ log = logging.getLogger("backfill")
 SEASON_DATE_RANGE = ("{season}-03-01", "{season}-11-15")  # covers spring training cutoff through World Series
 
 
-def backfill_reference(conn, season: int):
+def backfill_reference(conn, season: int, extra_player_ids: set[int] | None = None):
     log.info("[%s] teams + players", season)
     team_rows = build_team_rows(season)
     upsert_rows(conn, "teams", team_rows, conflict_cols=["team_id"])
 
     team_ids = [r["team_id"] for r in team_rows]
-    player_ids = collect_player_ids_for_season(team_ids, season)
+    player_ids = collect_player_ids_for_season(team_ids, season, extra_ids=extra_player_ids)
     # current_team_by_player: best-effort, last roster call wins for a
     # traded player -- good enough for "current team," which is refreshed
     # every run anyway (see players.py docstring).
@@ -86,10 +86,18 @@ def backfill_reference(conn, season: int):
     upsert_rows(conn, "park_factors", park_rows, conflict_cols=["park_id", "year"])
 
 
-def backfill_games(conn, season: int) -> list[dict]:
+def pull_season_games(season: int) -> list[dict]:
+    """Just the schedule pull (no DB writes) -- split out from backfill_games
+    so main() can harvest probable-starter player_ids from the result and
+    seed the players table with them BEFORE anything tries to insert a game
+    row that references one via foreign key. See
+    collect_player_ids_for_season's docstring for why that's necessary."""
     start, end = SEASON_DATE_RANGE[0].format(season=season), SEASON_DATE_RANGE[1].format(season=season)
     log.info("[%s] games %s..%s", season, start, end)
-    game_rows = build_game_rows(start, end, season=season)
+    return build_game_rows(start, end, season=season)
+
+
+def backfill_games(conn, season: int, game_rows: list[dict]) -> list[dict]:
     upsert_rows(conn, "games", game_rows, conflict_cols=["game_id"])
     return game_rows
 
@@ -236,9 +244,16 @@ def main():
     load_dotenv()
 
     for season in args.seasons:
+        game_rows = pull_season_games(season)
+        starter_ids = {
+            pid
+            for g in game_rows
+            for pid in (g.get("home_starter_id"), g.get("away_starter_id"))
+            if pid
+        }
         with get_conn() as conn:
-            backfill_reference(conn, season)
-            game_rows = backfill_games(conn, season)
+            backfill_reference(conn, season, extra_player_ids=starter_ids)
+            backfill_games(conn, season, game_rows)
         if not args.skip_pitches:
             with get_conn() as conn:
                 backfill_pitches(conn, season)

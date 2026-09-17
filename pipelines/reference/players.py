@@ -12,16 +12,42 @@ that's called out explicitly in the schema doc.
 """
 from __future__ import annotations
 
+import logging
+
 from pipelines.mlb_stats_client import get_roster, get_people
 
+log = logging.getLogger(__name__)
 
-def collect_player_ids_for_season(team_ids: list[int], season: int) -> list[int]:
+
+def collect_player_ids_for_season(team_ids: list[int], season: int, extra_ids: set[int] | None = None) -> list[int]:
+    """extra_ids: player ids known from OTHER sources (e.g. probable starters
+    pulled off the schedule -- see backfill.py) to fold in alongside whatever
+    the roster pulls return.
+
+    Confirmed live (17 Sep 2026, first real backfill): MLB's `rosterType:
+    fullSeason` does NOT reliably return every player who appears elsewhere
+    in a season's data (a real, active starter -- not some replacement-level
+    fringe case -- was missing from every team's fullSeason roster pull,
+    which then broke games.home_starter_id's foreign key). Root cause
+    unconfirmed (a mid-season trade/DFA edge in how the Stats API's
+    "fullSeason" roster type is scoped is the leading guess), so rather than
+    trust roster pulls as complete, callers are expected to also pass in any
+    player id they already know is referenced elsewhere.
+    """
     ids: set[int] = set()
     for team_id in team_ids:
         for entry in get_roster(team_id, season):
             person = entry.get("person") or {}
             if person.get("id"):
                 ids.add(person["id"])
+    if extra_ids:
+        missing = extra_ids - ids
+        if missing:
+            log.warning(
+                "[%s] %d player id(s) referenced elsewhere weren't in any team's roster pull -- adding them directly: %s",
+                season, len(missing), sorted(missing),
+            )
+        ids |= extra_ids
     return sorted(ids)
 
 

@@ -126,8 +126,19 @@ def build_game_result_row(game_pk: int) -> tuple[dict | None, int | None]:
 def update_game_umpire(conn, game_id: int, umpire_id: int | None, schema: str = "mlb") -> None:
     if umpire_id is None:
         return
+    # Savepoint-wrapped for the same reason as db.upsert_rows's fallback: this
+    # is the one write in the pipeline that goes around upsert_rows (it's an
+    # UPDATE, not an insert), so an umpire_id whose player row hasn't been
+    # seeded yet would otherwise poison the whole shared backfill transaction
+    # over one missing umpire.
     with conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE {schema}.games SET umpire_id = %s WHERE game_id = %s",
-            (umpire_id, game_id),
-        )
+        cur.execute("SAVEPOINT update_umpire")
+        try:
+            cur.execute(
+                f"UPDATE {schema}.games SET umpire_id = %s WHERE game_id = %s",
+                (umpire_id, game_id),
+            )
+            cur.execute("RELEASE SAVEPOINT update_umpire")
+        except Exception as exc:
+            cur.execute("ROLLBACK TO SAVEPOINT update_umpire")
+            log.warning("could not set umpire_id=%s on game=%s (%s: %s) -- leaving it null", umpire_id, game_id, type(exc).__name__, exc)
