@@ -31,6 +31,34 @@ def _read_savant_csv(url: str, params: dict) -> pd.DataFrame:
     return df
 
 
+def _read_savant_csv_optional(url: str, params: dict, what: str) -> pd.DataFrame:
+    """Same as _read_savant_csv, but never raises.
+
+    Confirmed live (17 Sep 2026, first real backfill run): the
+    statcast-park-factors leaderboard no longer honors `csv=true` the way
+    the other Savant leaderboards below still do -- it now always returns
+    the full interactive HTML page, which breaks pandas' CSV parser
+    (`Expected 1 fields ... saw 4`, from HTML lines sneaking into what
+    pandas expects to be comma-separated data). Rather than crash an
+    entire season's backfill over one enrichment source, log it clearly
+    and hand back an empty frame. build_park_factor_rows() already treats
+    "no matching venue-name column" as "leave park_factor_hr/runs null for
+    this park" -- see its warning -- so this degrades exactly the same way
+    a genuinely-missing row would, instead of stopping the run.
+    """
+    try:
+        return _read_savant_csv(url, params)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad: any failure here should degrade, not crash the caller
+        log.warning(
+            "could not fetch %s from Savant (%s: %s) -- leaving it null this run; "
+            "see _read_savant_csv_optional's docstring if this URL needs re-checking",
+            what,
+            type(exc).__name__,
+            exc,
+        )
+        return pd.DataFrame()
+
+
 def get_team_outs_above_average(year: int, through_date: str | None = None) -> pd.DataFrame:
     """Team-level Outs Above Average for a season, optionally as-of a date.
 
@@ -57,10 +85,16 @@ def get_team_outs_above_average(year: int, through_date: str | None = None) -> p
 
 
 def get_park_factors(year: int) -> pd.DataFrame:
-    """Savant's Statcast park factors leaderboard (HR factor, runs factor) for a season."""
-    return _read_savant_csv(
+    """Savant's Statcast park factors leaderboard (HR factor, runs factor) for a season.
+
+    Uses _read_savant_csv_optional, not _read_savant_csv -- see that
+    function's docstring for why (this specific leaderboard page has been
+    confirmed, live, to no longer return CSV via `csv=true`).
+    """
+    return _read_savant_csv_optional(
         "https://baseballsavant.mlb.com/leaderboard/statcast-park-factors",
         {"type": "year", "year": year, "batSide": "", "stat": "index_wOBA", "condition": "All", "rolling": "no"},
+        what="park factors",
     )
 
 

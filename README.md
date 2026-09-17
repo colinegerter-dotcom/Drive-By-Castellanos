@@ -156,6 +156,25 @@ CSV, and `pipelines/games/game_conditions.py` forces `wind_effect` to
 outside-the-stadium context), but treat those as weak signal too -- they
 don't reflect the climate-controlled conditions actually played in.
 
+**Confirmed broken, live (first real backfill run, 17 Sep 2026):**
+`park_factor_hr` / `park_factor_runs` will come back null for every park,
+every season, until this is fixed. Savant's statcast-park-factors
+leaderboard page no longer returns CSV data for the `csv=true` trick this
+pipeline (and pybaseball) uses everywhere else -- it now always serves the
+full interactive HTML page instead, which broke `backfill.py` outright on
+first run (`pandas.errors.ParserError`). `savant_client.get_park_factors`
+now catches that failure and returns an empty result instead of crashing
+(see `_read_savant_csv_optional`'s docstring), so the rest of the pipeline
+runs fine, but the two HR/runs park-factor columns are simply unpopulated
+until someone finds the current working endpoint for that specific
+leaderboard (or a replacement source -- FanGraphs has park factors too,
+via a different methodology, and is what at least one other Savant-scraper
+project fell back to for this same gap; that'd be a real methodology
+change worth deciding on deliberately, not defaulting into).
+`field_orientation_degrees` on this table is unaffected -- that column
+comes from the hand-researched CSV, not Savant, and still populates
+normally.
+
 **Needs live-API verification (couldn't confirm the exact response shape
 without network access):**
 - `games.national_tv_flag` classification (`pipelines/games/games.py`,
@@ -167,6 +186,11 @@ without network access):**
   query in "Team" mode. If it doesn't, `team_form.def_oaa_season` is
   silently season-end data reused on every game, which **would be a
   lookahead-bias violation** -- verify this before trusting that one column.
+  (`team_form.py` already catches any failure from this call per-game and
+  leaves `def_oaa_season` null rather than crashing, so if this leaderboard
+  has also stopped honoring `csv=true` the backfill will still complete --
+  just watch the Action log for repeated "failed to pull team OAA"
+  warnings, which would tell you that's the case.)
 - Savant CSV column names in `savant_client.py` / `park_factors.py` --
   Savant has changed these before; code picks from a candidate list and
   logs a warning if nothing matches.
