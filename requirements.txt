@@ -1,0 +1,6 @@
+requests>=2.31
+psycopg2-binary>=2.9
+pybaseball>=2.2.7
+pandas>=2.0
+python-dotenv>=1.0
+tenacity>=8.2

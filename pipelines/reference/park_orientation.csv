@@ -1,0 +1,33 @@
+venue_name,orientation_degrees_azimuth,notes
+American Family Field,295,Retractable roof; closed in available satellite imagery -- orientation estimated from the visible structure only, LOW confidence. Roofed park: wind_effect is forced to neutral regardless of this value (see game_conditions.py) since per-game roof state isn't tracked.
+Angel Stadium,30,Estimated visually from Google Maps satellite imagery (home-plate-to-center-field compass bearing). Stadium was under renovation in the available imagery with the field partially obscured -- LOWER confidence.
+Busch Stadium,37,Estimated visually from Google Maps satellite imagery. High confidence -- field fully visible, clean diamond shape.
+Chase Field,,UNRESOLVED -- retractable roof closed in available satellite imagery, field not visible at all. Roofed park: wind_effect is forced to neutral (see game_conditions.py).
+Citi Field,337,Estimated visually from Google Maps satellite imagery. High confidence.
+Citizens Bank Park,340,Estimated visually from Google Maps satellite imagery. High confidence.
+Comerica Park,141,Estimated visually from Google Maps satellite imagery. This bearing (SE) is unusual relative to most parks, which cluster N-NE -- worth a spot-check against a second source before trusting it fully.
+Coors Field,342,Estimated visually from Google Maps satellite imagery. High confidence.
+Daikin Park,,UNRESOLVED -- retractable roof closed in available satellite imagery, field not visible at all. Roofed park: wind_effect is forced to neutral (see game_conditions.py).
+Dodger Stadium,32,Estimated visually from Google Maps satellite imagery. High confidence.
+Fenway Park,42,Estimated visually from Google Maps satellite imagery. High confidence.
+George M. Steinbrenner Field,,TODO -- not researched. Rays' 2025-only stopgap home after Tropicana Field's hurricane damage; only affects 2025 Rays home games in a historical backfill. Low priority -- confirm venue-name match before relying on any 2025 wind_effect for Rays home games.
+Globe Life Field,,UNRESOLVED -- fully enclosed retractable roof, closed and opaque in available satellite imagery, field not visible at all. Roofed park: wind_effect is forced to neutral (see game_conditions.py).
+Great American Ball Park,10,Estimated visually from Google Maps satellite imagery. Moderate-high confidence.
+Guaranteed Rate Field,186,Same physical venue as "Rate Field" below -- the White Sox park was renamed in 2025. Duplicated here under the old name so a historical (pre-2025) pull that returns this venue name still joins correctly. Bearing (S) is unusual relative to most parks -- worth a spot-check.
+Kauffman Stadium,13,Estimated visually from Google Maps satellite imagery. Moderate-high confidence.
+loanDepot park,,UNRESOLVED -- retractable roof closed in available satellite imagery, field not visible at all. Roofed park: wind_effect is forced to neutral (see game_conditions.py).
+Nationals Park,2,Estimated visually from Google Maps satellite imagery. High confidence.
+Oracle Park,60,Estimated visually from Google Maps satellite imagery. The seating-bowl geometry here is more complex than most parks (irregular shape hugging McCovey Cove), so this is a harder read -- MODERATE confidence. Directionally consistent with Oracle Park's known unusually-easterly orientation (most parks face N-NE; this one faces toward the bay).
+Oriole Park at Camden Yards,358,Estimated visually from Google Maps satellite imagery. High confidence.
+PNC Park,117,Estimated visually from Google Maps satellite imagery. Corroborated by the park's well-known downtown-Pittsburgh-skyline view over right field, which only makes sense if the park faces roughly this direction. High confidence.
+Petco Park,350,Estimated visually from Google Maps satellite imagery. High confidence.
+Progressive Field,2,Estimated visually from Google Maps satellite imagery. High confidence.
+Rate Field,186,Estimated visually from Google Maps satellite imagery. Bearing (S) is unusual relative to most parks, which cluster N-NE -- worth a spot-check against a second source before trusting it fully. (Same venue as "Guaranteed Rate Field" above under its pre-2025 name.)
+Rogers Centre,,UNRESOLVED -- retractable roof closed in available satellite imagery, field not visible at all. Roofed park: wind_effect is forced to neutral (see game_conditions.py).
+Sutter Health Park,14,Estimated visually from Google Maps satellite imagery. Athletics' temporary home through 2027 -- confirm this is still the current venue before relying on it in future seasons. Moderate-high confidence.
+T-Mobile Park,12,Estimated visually from Google Maps satellite imagery; the retractable roof happened to be open in the available imagery so the field was directly visible. Still treated as a roofed park: wind_effect is forced to neutral regardless of this value (see game_conditions.py), since per-game roof state isn't tracked and Seattle games run open or closed roof depending on weather.
+Target Field,344,Estimated visually from Google Maps satellite imagery. Moderate confidence.
+Tropicana Field,,UNRESOLVED -- fixed dome, always closed, field not visible in any satellite imagery. Roofed park: wind_effect is forced to neutral (see game_conditions.py). Confirm this is the Rays' current venue for the season being pulled -- they played all of 2025 at George M. Steinbrenner Field after storm damage and returned to a repaired Tropicana Field for 2026.
+Truist Park,152,Estimated visually from Google Maps satellite imagery. Moderate confidence.
+Wrigley Field,30,Estimated visually from Google Maps satellite imagery. High confidence -- matches the commonly-cited fact that Wrigley is one of the few parks that actually follows the old "home-to-second should run east-northeast" rule from the rulebook.
+Yankee Stadium,33,Estimated visually from Google Maps satellite imagery. High confidence.

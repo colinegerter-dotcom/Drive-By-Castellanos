@@ -1,0 +1,41 @@
+name: Historical backfill (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Seasons to backfill, space-separated (e.g. 2025 or 2021 2022 2023 2024 2025)"
+        required: true
+        default: "2025"
+      skip_pitches:
+        description: "Skip the slow Statcast pitch-level pull (fast validation run -- leave checked for a first test)"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backfill
+        env:
+          SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+          SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+          SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+          SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          if [ "${{ inputs.skip_pitches }}" = "true" ]; then
+            python scripts/backfill.py --seasons ${{ inputs.seasons }} --skip-pitches
+          else
+            python scripts/backfill.py --seasons ${{ inputs.seasons }}
+          fi

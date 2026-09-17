@@ -1,0 +1,30 @@
+name: Daily MLB data pull
+
+on:
+  schedule:
+    # 10:00 UTC = 5:00 AM Central (4:00 AM during DST) -- well after the last
+    # games end and before the day's slate needs pregame form tables.
+    - cron: "0 10 * * *"
+  workflow_dispatch: {}  # lets Colin trigger a manual run from the Actions tab
+
+jobs:
+  daily-pull:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily pull
+        env:
+          SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+          SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+          SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+          SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: python scripts/daily_pull.py
