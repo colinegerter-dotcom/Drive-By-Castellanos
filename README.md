@@ -159,6 +159,15 @@ foreign key, and triggered the row-by-row retry on nearly every chunk.
 `reference/players.ensure_players_exist` now fetches and inserts them before
 the lineup write, in both the backfill and the daily job.
 
+**5. The lookahead fix itself had an edge case** (caught on the very next
+run, 18 Sep): ending every window the day before the game means a player
+making his MLB *debut* in that game gets a career window running from his
+debut date to the day before it -- backwards. MLB answers that with a 400
+and the run died on game 1 of the season. `get_player_stats_by_date_range`
+now returns no stats for a backwards window without calling the API (which
+is the correct answer: no prior games), and treats any other 400 as "leave
+these columns null" with a warning rather than killing a multi-hour job.
+
 **Resuming:** `scripts/backfill.py --resume` skips games that already have
 form rows. It is off by default on purpose -- it is only safe when
 continuing an interrupted run of the *same* code, which is not the case

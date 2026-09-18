@@ -130,11 +130,38 @@ def get_player_stats_by_date_range(
     Statcast pitch events alone (Statcast has no concept of an error or an
     unearned run). group is "pitching" or "hitting". Returns {} if the
     player had no games in range (e.g. hadn't debuted yet, or is on IL).
+
+    EMPTY WINDOW (added 18 Sep 2026, after this crashed a run): callers now
+    end their ranges the day BEFORE the game being scored (the lookahead fix
+    in the form modules), which means a player making his MLB debut in that
+    game gets career_start = his debut date = the game date, and an end date
+    one day earlier. MLB answers a backwards range with a 400 and the whole
+    backfill dies -- it died on game 1 of 2025, a debut in the Tokyo Series
+    opener. A backwards window is not an error, it's the correct statement
+    that the player has no prior games, so return no stats without calling
+    the API at all. ISO dates compare correctly as strings.
     """
-    data = _get(
-        f"{MLB_STATS_API_BASE}/people/{player_id}/stats",
-        {"stats": "byDateRange", "group": group, "startDate": start_date, "endDate": end_date},
-    )
+    if start_date > end_date:
+        return {}
+
+    try:
+        data = _get(
+            f"{MLB_STATS_API_BASE}/people/{player_id}/stats",
+            {"stats": "byDateRange", "group": group, "startDate": start_date, "endDate": end_date},
+        )
+    except requests.HTTPError as exc:
+        # A 400 here means MLB rejected this particular player/range combination,
+        # not that the API is down (5xx and rate limits are retried above, and
+        # still raise). One unusable stat line should leave one set of columns
+        # null, not kill a multi-hour backfill -- but it's logged every time so
+        # a systemic break shows up as a wall of warnings rather than silence.
+        if exc.response is not None and exc.response.status_code == 400:
+            log.warning(
+                "MLB rejected %s stats for player %s over %s..%s (400) -- leaving those columns null",
+                group, player_id, start_date, end_date,
+            )
+            return {}
+        raise
     stats_list = data.get("stats", [])
     if not stats_list:
         return {}
