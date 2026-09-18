@@ -52,8 +52,19 @@ def _k_bb_pct(stat: dict) -> tuple[float | None, float | None]:
 
 
 def build_starting_pitcher_form_row(
-    conn, pitcher_id: int, game_id: int, game_date: str, season: int, debut_date: str | None
+    conn,
+    pitcher_id: int,
+    game_id: int,
+    game_date: str,
+    season: int,
+    debut_date: str | None,
+    prefetched: dict | None = None,
 ) -> dict:
+    """prefetched: optional {"season": stat, "last30": stat,
+    "career_before_season": totals} for THIS pitcher, fetched in bulk by the
+    caller. Same purpose and shape as in starting_batter_form.py -- see that
+    module for why the per-player version was too slow to finish a season.
+    """
     season_start = SEASON_START.format(season=season)
     career_start = debut_date or season_start
 
@@ -67,11 +78,28 @@ def build_starting_pitcher_form_row(
     # sql_helpers already enforced on the Statcast side.
     as_of_end = (date.fromisoformat(game_date) - timedelta(days=1)).isoformat()
 
-    season_stat = get_player_stats_by_date_range(pitcher_id, "pitching", season_start, as_of_end)
-    # last-30-days window
     last30_start = (date.fromisoformat(game_date) - timedelta(days=30)).isoformat()
-    last30_stat = get_player_stats_by_date_range(pitcher_id, "pitching", last30_start, as_of_end)
-    career_stat = get_player_stats_by_date_range(pitcher_id, "pitching", career_start, as_of_end)
+
+    if prefetched is None:
+        season_stat = get_player_stats_by_date_range(pitcher_id, "pitching", season_start, as_of_end)
+        last30_stat = get_player_stats_by_date_range(pitcher_id, "pitching", last30_start, as_of_end)
+        career_stat = get_player_stats_by_date_range(pitcher_id, "pitching", career_start, as_of_end)
+        mlb_ip_count = career_stat.get("inningsPitched")
+    else:
+        season_stat = prefetched.get("season") or {}
+        last30_stat = prefetched.get("last30") or {}
+        # Career innings rebuilt from OUTS, not from MLB's "123.2" innings
+        # strings (which are innings-and-thirds, not decimals -- adding them as
+        # numbers would be wrong). Prior seasons come from the once-per-backfill
+        # bulk pull; this season's outs come from the season window.
+        outs_before = (prefetched.get("career_before_season") or {}).get("outs")
+        outs_this_season = season_stat.get("outs")
+        total_outs = (
+            (outs_before or 0) + (outs_this_season or 0)
+            if (outs_before is not None or outs_this_season is not None)
+            else None
+        )
+        mlb_ip_count = round(total_outs / 3.0, 1) if total_outs is not None else None
 
     k_pct_season, bb_pct_season = _k_bb_pct(season_stat)
     k_pct_30d, bb_pct_30d = _k_bb_pct(last30_stat)
@@ -148,6 +176,6 @@ def build_starting_pitcher_form_row(
         "spin_rate_percentile": None,  # not yet built -- see module docstring
         "ground_ball_pct": ground_ball_pct,
         "whiff_pct": whiff_pct,
-        "mlb_ip_count": career_stat.get("inningsPitched"),
+        "mlb_ip_count": mlb_ip_count,
         "days_since_trade": None,  # no transactions table in scope for this build
     }

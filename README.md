@@ -173,14 +173,43 @@ form rows. It is off by default on purpose -- it is only safe when
 continuing an interrupted run of the *same* code, which is not the case
 across the lookahead fix above.
 
-**Still open, not fixed here:** the form stage still makes ~60 MLB Stats API
-calls per game (3 per batter, 3 per starting pitcher), which is roughly 3-4
-hours per season on its own. Batching those via
-`/people?personIds=...&hydrate=stats(...)` would cut it to a few calls per
-game; the league-wide `byDateRange` leaderboard is NOT a substitute (checked
-live -- it returns ~151 qualified players, not all ~900 batters, so bench
-players would go missing). Worth doing before backfilling 2021-2024, both
-for wall-clock and for GitHub Actions minutes.
+**6. The per-player API calls, now batched (18 Sep, after a 4th run).** With
+the bullpen fix in, the form stage still measured 20+ minutes per 100 games
+and could not finish inside the 6-hour cap. The remaining cost was the ~60
+separate MLB Stats API calls each game made for per-player stats (3 windows
+x ~18 batters, plus the starters). Fixed three ways:
+
+- `get_stats_by_date_range_bulk` hydrates one byDateRange window onto a whole
+  list of players in a single request, so a game costs ~4 calls instead of
+  ~60 -- roughly 10,000 requests for a season instead of 135,000.
+- Career-to-date is no longer fetched per batter per game at all. It is
+  rebuilt as (all prior seasons) + (this season so far), with the prior-season
+  half pulled once per backfill by `get_career_totals_before_season`. Career
+  innings are summed from OUTS, never from MLB's "123.2" innings strings,
+  which are innings-and-thirds and would be wrong added as decimals.
+- `_pick_mlb_split` fixes a latent correctness bug found while verifying the
+  response shape: MLB returns each window once per sport (an MLB split, an
+  "All" rollup, plus minor-league splits for anyone optioned or on rehab),
+  and the old code took `splits[0]` blindly. It now selects the MLB split
+  explicitly, so a player's AAA line can't be passed off as major-league form.
+
+`tests/test_bulk_stats.py` covers all of this offline with fixtures shaped
+like the live responses -- including that the prefetched path produces
+identical wOBA/K%/BB% to the old per-call path. Run it with
+`python tests/test_bulk_stats.py`; it needs no network and no database.
+`daily_pull.py` deliberately still uses the per-player path, since it only
+touches a day or two of games.
+
+**Still open:** the next lever, if the form stage is ever still too slow, is
+batching by DATE rather than by game -- every game on the same day shares the
+same as-of windows, so ~15 games could share one set of calls instead of one
+set each (~1,900 requests a season instead of ~10,000). Not done, because
+per-game batching was the lower-risk change and should be sufficient.
+
+Note for anyone tempted by the league-wide `byDateRange` leaderboard as a
+shortcut: it is NOT a substitute (checked live -- it returns ~151 qualified
+players, not all ~900 batters, so bench players would silently go missing).
+The per-player-ids hydration used here is the right endpoint.
 
 ## Known gaps and approximations (read before trusting a number)
 

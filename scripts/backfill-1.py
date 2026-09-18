@@ -208,20 +208,15 @@ def backfill_form_tables(conn, season: int, game_rows: list[dict], resume: bool 
     only for having the source rows present at all).
 
     This is the stage that was actually taking 4+ hours and counting on a
-    real run -- team/pitcher/batter form for every player in every game. It
-    took three passes to make it viable:
-
-    1. (17 Sep) Writes were one row at a time with no commit until the whole
-       season finished. Now batched per table and committed every
-       COMMIT_EVERY_N_GAMES games.
-    2. (18 Sep) bullpen_status refetched every prior game's box score, making
-       the cost per game grow as the season went on -- quadratic, ~15 hours
-       for one season. Fixed by caching in that module.
-    3. (18 Sep) The remaining cost was ~60 MLB API calls per game for
-       per-player stats, still 20+ minutes per 100 games. Now every player in
-       a game shares one request per window (~4 calls per game), and career
-       totals are prefetched once for the whole season instead of per player
-       per game.
+    real run (confirmed live, 17 Sep 2026) -- team/pitcher/batter form for
+    every player in every game, previously written one row at a time with
+    no commit until the whole season finished. Same batching/commit fix as
+    backfill_postgame, applied here where it mattered most: starting_batter_
+    form alone can be 15-20+ rows per game. This does NOT reduce the number
+    of read queries build_*_form_row runs per player per game (those still
+    happen one at a time -- that's a separate, unmeasured cost); it only
+    fixes the write side and gives real commit checkpoints. If a rerun is
+    still very slow, the reads themselves are the next thing to profile.
     """
     # Pull debut dates once so player_form doesn't hit the DB per player per game.
     with conn.cursor() as cur:
@@ -397,7 +392,9 @@ def backfill_form_tables(conn, season: int, game_rows: list[dict], resume: bool 
                 )
             )
 
-        _maybe_flush(i)
+        if i % COMMIT_EVERY_N_GAMES == 0 or i == total_games:
+            _flush()
+            log.info("[%s] form tables: %d/%d games processed", season, i, total_games)
 
     # umpire_stats: one row per (umpire, season), refreshed to as-of "now"
     # (end of backfill range) rather than per-game -- it's a season-level

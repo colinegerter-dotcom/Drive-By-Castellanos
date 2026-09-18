@@ -71,8 +71,26 @@ def _k_bb_pct(stat: dict) -> tuple[float | None, float | None]:
 
 
 def build_starting_batter_form_row(
-    conn, batter_id: int, game_id: int, game_date: str, season: int, debut_date: str | None
+    conn,
+    batter_id: int,
+    game_id: int,
+    game_date: str,
+    season: int,
+    debut_date: str | None,
+    prefetched: dict | None = None,
 ) -> dict:
+    """prefetched: optional {"season": stat, "last30": stat,
+    "career_before_season": totals} for THIS batter, already fetched in bulk by
+    the caller (see scripts/backfill.py). Supplying it replaces the three
+    per-player HTTP calls this function would otherwise make.
+
+    Why it exists: those three calls, times ~18 batters, times every game, were
+    ~135,000 requests for one season and measured at 20+ minutes per 100 games
+    on 18 Sep 2026 -- too slow to finish inside GitHub's 6-hour cap. Fetching a
+    whole lineup's window in one request cuts that by more than an order of
+    magnitude. Left optional so daily_pull.py, which only ever touches a
+    handful of games, keeps working unchanged.
+    """
     season_start = SEASON_START.format(season=season)
     career_start = debut_date or season_start
     last30_start = (date.fromisoformat(game_date) - timedelta(days=30)).isoformat()
@@ -87,9 +105,27 @@ def build_starting_batter_form_row(
     # the day BEFORE the game makes both sources agree on the same cutoff.
     as_of_end = (date.fromisoformat(game_date) - timedelta(days=1)).isoformat()
 
-    season_stat = get_player_stats_by_date_range(batter_id, "hitting", season_start, as_of_end)
-    last30_stat = get_player_stats_by_date_range(batter_id, "hitting", last30_start, as_of_end)
-    career_stat = get_player_stats_by_date_range(batter_id, "hitting", career_start, as_of_end)
+    if prefetched is None:
+        season_stat = get_player_stats_by_date_range(batter_id, "hitting", season_start, as_of_end)
+        last30_stat = get_player_stats_by_date_range(batter_id, "hitting", last30_start, as_of_end)
+        career_stat = get_player_stats_by_date_range(batter_id, "hitting", career_start, as_of_end)
+        mlb_pa_count = career_stat.get("plateAppearances")
+    else:
+        season_stat = prefetched.get("season") or {}
+        last30_stat = prefetched.get("last30") or {}
+        # Career-to-date = everything before this season (a constant, fetched
+        # once per backfill) + this season so far. Equivalent to the old
+        # debut-date-to-yesterday window, without a call per batter per game --
+        # and it can't drift into lookahead, because both halves are bounded
+        # by the same as-of cutoff.
+        prior_totals = prefetched.get("career_before_season") or {}
+        pa_before = prior_totals.get("plateAppearances")
+        pa_this_season = season_stat.get("plateAppearances")
+        mlb_pa_count = (
+            (pa_before or 0) + (pa_this_season or 0)
+            if (pa_before is not None or pa_this_season is not None)
+            else None
+        )
 
     k_pct_season, bb_pct_season = _k_bb_pct(season_stat)
     k_pct_30d, bb_pct_30d = _k_bb_pct(last30_stat)
@@ -140,6 +176,6 @@ def build_starting_batter_form_row(
         "barrel_pct_last_30d": barrel_pct_30d,
         "vs_pitcher_hand_split": None,  # not yet built -- see module docstring
         "days_since_last_game": days_since_last_game,
-        "mlb_pa_count": career_stat.get("plateAppearances"),
+        "mlb_pa_count": mlb_pa_count,
         "days_since_trade": None,  # no transactions table in scope for this build
     }

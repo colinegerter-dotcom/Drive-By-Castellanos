@@ -26,10 +26,16 @@ class MlbApiError(Exception):
     pass
 
 
+# Widened from 4 attempts / 20s max on 18 Sep 2026: MLB was measurably slower
+# that afternoon after a day of heavy backfilling (the postgame stage ran at
+# 100 games/min versus 171 earlier), and a burst of 429s or 5xxs that outlasts
+# four quick retries would kill a multi-hour job outright. Only transient
+# failures are retried -- a 400 still fails fast, since retrying a malformed
+# request just wastes the clock.
 @retry(
     reraise=True,
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=2, max=20),
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=1, min=2, max=45),
     retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout, MlbApiError)),
 )
 def _get(url: str, params: dict | None = None) -> dict:
@@ -85,6 +91,165 @@ def get_people(player_ids: list[int]) -> list[dict]:
         chunk = player_ids[i : i + CHUNK]
         data = _get(f"{MLB_STATS_API_BASE}/people", {"personIds": ",".join(str(p) for p in chunk)})
         out.extend(data.get("people", []))
+    return out
+
+
+def _pick_mlb_split(splits: list[dict]) -> dict:
+    """Pick the MLB line out of a stats split list.
+
+    Confirmed live (18 Sep 2026): MLB returns the SAME window more than once,
+    once per sport -- a sport.id == 1 (MLB) split and a sport.id == 0 ("All")
+    roll-up, and for a player who spent part of the window in the minors there
+    are additional splits for those sports too. The old per-player code took
+    splits[0] blindly, which is right only by luck: for an optioned player or
+    someone on a rehab assignment it could return a minor-league or
+    minors-inclusive line and quietly pass it off as major-league form. Prefer
+    the explicit MLB split, and fall back to the first one only when no split
+    carries a sport id at all.
+    """
+    if not splits:
+        return {}
+    for split in splits:
+        if (split.get("sport") or {}).get("id") == 1:
+            return split.get("stat", {})
+    return splits[0].get("stat", {})
+
+
+def get_stats_by_date_range_bulk(
+    player_ids: list[int], group: str, start_date: str, end_date: str
+) -> dict[int, dict]:
+    """byDateRange stats for MANY players in one request, keyed by player_id.
+
+    This exists because the per-player version was the pipeline's dominant
+    cost: the form tables asked for 3 windows per batter per game, about 60
+    HTTP calls for a single game and ~135,000 for a season, which measured out
+    at 20+ minutes per 100 games against GitHub's 6-hour job cap. The
+    /people endpoint accepts a list of personIds and will hydrate the same
+    byDateRange window onto all of them at once, so a whole lineup costs one
+    call instead of eighteen.
+
+    Players with no games in the window simply come back absent from the
+    result; callers should treat a missing id as {} (no stats), exactly like
+    the single-player function does.
+    """
+    if not player_ids:
+        return {}
+    # Same empty-window guard as the single-player call -- see its docstring.
+    if start_date > end_date:
+        return {}
+
+    out: dict[int, dict] = {}
+    CHUNK = 100
+    hydrate = (
+        f"stats(group=[{group}],type=[byDateRange],"
+        f"startDate={start_date},endDate={end_date})"
+    )
+    ids = sorted({int(p) for p in player_ids if p is not None})
+    for i in range(0, len(ids), CHUNK):
+        chunk = ids[i : i + CHUNK]
+        try:
+            data = _get(
+                f"{MLB_STATS_API_BASE}/people",
+                {"personIds": ",".join(str(p) for p in chunk), "hydrate": hydrate},
+            )
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 400:
+                log.warning(
+                    "MLB rejected bulk %s stats for %d players over %s..%s (400) -- those columns stay null",
+                    group, len(chunk), start_date, end_date,
+                )
+                continue
+            raise
+
+        for person in data.get("people", []):
+            pid = person.get("id")
+            if pid is None:
+                continue
+            for entry in person.get("stats", []):
+                # Match BOTH group and type. Only byDateRange is requested, but
+                # matching on group alone would silently accept some other
+                # stats block if MLB ever returned an extra one -- and a wrong
+                # number here looks exactly like a right one downstream.
+                if (entry.get("group") or {}).get("displayName") != group:
+                    continue
+                if (entry.get("type") or {}).get("displayName") != "byDateRange":
+                    continue
+                stat = _pick_mlb_split(entry.get("splits", []))
+                if stat:
+                    out[pid] = stat
+                break
+    return out
+
+
+def get_career_totals_before_season(player_ids: list[int], group: str, season: int) -> dict[int, dict]:
+    """Summed yearByYear totals for every season BEFORE `season`, per player.
+
+    Used to rebuild "career to date" without a per-game API call. Career PA is
+    the only career figure the form tables use, and career-to-date at any point
+    in a season is just (everything before this season) + (this season so far).
+    The first half is a constant for the whole backfill of that season, so it's
+    fetched once here instead of once per batter per game -- and it dodges the
+    lookahead trap of asking for career totals "as of now", which would include
+    games that hadn't been played yet at the point being modelled.
+
+    Only counting stats are summed; rate stats would be meaningless added up
+    and are deliberately not returned.
+    """
+    if not player_ids:
+        return {}
+    # `outs` rather than `inningsPitched` on purpose: MLB returns innings as a
+    # string like "123.2", meaning 123 and two THIRDS, so adding those as
+    # decimals is silently wrong. Outs are a plain integer and divide cleanly
+    # by 3 back into innings at the point of use.
+    SUMMABLE = ("plateAppearances", "atBats", "gamesPlayed", "battersFaced", "outs")
+    out: dict[int, dict] = {}
+    # Smaller chunk than the byDateRange call on purpose: a yearByYear hydrate
+    # returns one split per season PER PLAYER (a veteran can have 15+), so 100
+    # players is a much heavier response than 100 players over one window, and
+    # this runs against a 30-second request timeout.
+    CHUNK = 50
+    hydrate = f"stats(group=[{group}],type=[yearByYear])"
+    ids = sorted({int(p) for p in player_ids if p is not None})
+    for i in range(0, len(ids), CHUNK):
+        chunk = ids[i : i + CHUNK]
+        try:
+            data = _get(
+                f"{MLB_STATS_API_BASE}/people",
+                {"personIds": ",".join(str(p) for p in chunk), "hydrate": hydrate},
+            )
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 400:
+                log.warning("MLB rejected bulk yearByYear %s stats for %d players (400)", group, len(chunk))
+                continue
+            raise
+
+        for person in data.get("people", []):
+            pid = person.get("id")
+            if pid is None:
+                continue
+            totals: dict[str, int] = {}
+            for entry in person.get("stats", []):
+                if (entry.get("group") or {}).get("displayName") != group:
+                    continue
+                for split in entry.get("splits", []):
+                    # yearByYear splits carry a season; skip this season and
+                    # anything later, and skip non-MLB lines so minor league
+                    # plate appearances don't inflate a "career MLB PA" figure.
+                    try:
+                        split_season = int(split.get("season"))
+                    except (TypeError, ValueError):
+                        continue
+                    if split_season >= season:
+                        continue
+                    if (split.get("sport") or {}).get("id") not in (1, None):
+                        continue
+                    stat = split.get("stat", {})
+                    for key in SUMMABLE:
+                        value = stat.get(key)
+                        if isinstance(value, int):
+                            totals[key] = totals.get(key, 0) + value
+            if totals:
+                out[pid] = totals
     return out
 
 
