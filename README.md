@@ -200,6 +200,33 @@ unconfirmed (a mid-season trade/DFA edge in how the Stats API scopes
    says exactly which row and column, which is the signal to go add that
    case the same way #1 does.
 
+**Confirmed live, same day, bigger problem:** the fixes above let a real
+backfill run get further, and it then ran for 4+ hours and was still under
+half done on a single season before Colin cancelled it. Root cause:
+`backfill_postgame` and `backfill_form_tables` (`scripts/backfill.py`) were
+writing one row at a time -- a separate `upsert_rows` call, i.e. a separate
+network round trip to Supabase, per team/pitcher/batter *per game* --
+inside one shared transaction that never committed until the entire
+season's postgame-and-form-tables stage finished. `starting_batter_form`
+alone is 15-20+ rows per game, so a full season is tens of thousands of
+individual round trips. Worse: because nothing committed until the very
+end, a killed run (GitHub's 6-hour job cap, a dropped connection, anything)
+would have lost ALL of that work, not just whatever was mid-flight.
+
+Fixed by batching: both functions now accumulate rows per table across
+`COMMIT_EVERY_N_GAMES` (100) games, upsert each table once per chunk, and
+commit at that checkpoint. An interruption now only costs a re-run of the
+last partial chunk -- cheap and safe, since every write here is an
+idempotent upsert. This does NOT address the read side -- `build_team_form_row`,
+`build_bullpen_status_row`, `build_starting_pitcher_form_row`, and
+`build_starting_batter_form_row` all still run their own SQL queries one
+player at a time per game, same as before. If a rerun is still
+unexpectedly slow, that's the next thing to profile (and `bullpen_status.py`'s
+own known live-feed-refetching issue, noted below, is a specific known
+contributor to it). `daily_pull.py` was left as-is -- it only ever touches
+1-2 days of games at a time, so this same pattern there is a few hundred
+rows at most, not a real problem.
+
 **Needs live-API verification (couldn't confirm the exact response shape
 without network access):**
 - `games.national_tv_flag` classification (`pipelines/games/games.py`,
