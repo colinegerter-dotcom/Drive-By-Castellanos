@@ -45,7 +45,11 @@ from dotenv import load_dotenv
 from pipelines.config import CENTRAL, CURRENT_SEASON
 from pipelines.db import get_conn, upsert_rows
 from pipelines.reference.teams import build_team_rows
-from pipelines.reference.players import collect_player_ids_for_season, build_player_rows
+from pipelines.reference.players import (
+    collect_player_ids_for_season,
+    build_player_rows,
+    ensure_players_exist,
+)
 from pipelines.games.games import build_game_rows
 from pipelines.games.game_results import build_game_result_row, update_game_umpire
 from pipelines.games.lineup import build_lineup_rows
@@ -117,6 +121,10 @@ def run(today: str | None = None):
                 continue
             upsert_rows(conn, "game_results", [result_row], conflict_cols=["game_id"])
             lineup_rows = build_lineup_rows(g["game_id"])
+            # Same gap the backfill hit: a player can appear in a box score
+            # without having been on any roster pull, and his lineup row would
+            # otherwise be silently dropped by the foreign key every night.
+            ensure_players_exist(conn, {r["player_id"] for r in lineup_rows})
             upsert_rows(conn, "lineup", lineup_rows, conflict_cols=["game_id", "team_id", "player_id"])
             cond_row = build_game_condition_row(
                 game_id=g["game_id"],

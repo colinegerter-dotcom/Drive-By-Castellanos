@@ -44,13 +44,39 @@ _session = requests.Session()
 _HOURLY_VARS = "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m"
 
 
+def venue_name_keys(name: str) -> list[str]:
+    """Every name a venue might be referred to by, most specific first.
+
+    Sponsor renames are the reason this exists. Confirmed live (18 Sep 2026):
+    MLB's /venues endpoint now calls venue 22 "UNIQLO Field at Dodger
+    Stadium", while the schedule endpoint still reports that game's venue as
+    "Dodger Stadium" -- so a plain name-keyed lookup missed every Dodgers home
+    game and silently skipped the weather for all of them ("no coordinates for
+    venue 'Dodger Stadium'" in the backfill log, ~90 games a season). Keying
+    on the part after " at " as well as the full name covers the whole
+    "<Sponsor> Field/Park at <Real Stadium>" pattern rather than special-casing
+    one park. The real fix is to key parks by venue id everywhere instead of
+    name -- that's a schema change (games.venue is a name), noted in the README.
+    """
+    keys = [name]
+    for separator in (" at ",):
+        if separator in name:
+            keys.append(name.split(separator, 1)[1].strip())
+    return keys
+
+
 def _venue_coords_by_name() -> dict[str, tuple[float, float]]:
-    out = {}
+    out: dict[str, tuple[float, float]] = {}
     for v in get_venues():
         loc = (v.get("location") or {}).get("defaultCoordinates") or {}
         lat, lon = loc.get("latitude"), loc.get("longitude")
-        if v.get("name") and lat is not None and lon is not None:
-            out[v["name"]] = (lat, lon)
+        name = v.get("name")
+        if not name or lat is None or lon is None:
+            continue
+        for key in venue_name_keys(name):
+            # First writer wins so a real venue never gets clobbered by
+            # another park's alias.
+            out.setdefault(key, (lat, lon))
     return out
 
 

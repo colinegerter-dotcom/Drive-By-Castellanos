@@ -106,6 +106,73 @@ the correct implementation of "timezone-aware, storing the UTC offset, no
 DST ambiguity" -- see `pipelines/config.py`'s docstring for why storing a
 literal "America/Chicago" string per row isn't necessary or better.
 
+## What the 18 Sep 2026 backfill run found (read this first)
+
+The second full attempt ran 5h35m, got through all 2,511 games of postgame
+work and 1,400 games of form tables, then hit GitHub's 6-hour job cap. Four
+findings came out of it, all fixed in this commit:
+
+**1. The form-table stage was quadratic, and could never have finished.**
+Chunk times grew steadily -- ~9 minutes per 100 games early in the season,
+~36 minutes per 100 games by game 1,400 -- on track for roughly 15 hours for
+a single season. Cause: `bullpen_status.py` fetched a full box score for
+every prior game in a team's lookback window, per team, per game, with no
+cache, and the season-long window grows as the season goes on. That is on
+the order of 400,000 HTTP fetches for one season, almost all of them
+refetching a box score already fetched. It now caches each game's parsed
+pitching lines by `game_id` (both teams at once), so it's at most ~2,500
+fetches per season. Verified by stubbing the fetcher: 1,000 repeat calls
+collapse to 1.
+
+**2. Savant's OAA leaderboard was being called once per team per game**
+(~5,000 times a season) when it only ever varies by as-of date (~190
+distinct values). Now cached by `(year, through_date)`. It also went through
+the non-raising wrapper, and `savant_client` now has a circuit breaker: after
+3 failures against a URL it stops calling it for the rest of the run. That
+run ate a 60-second read timeout against Savant; without the breaker, a
+Savant outage would mean thousands of 60-second stalls.
+
+**3. LOOKAHEAD BIAS in every API-sourced form number.** MLB's `byDateRange`
+endpoint is inclusive of `endDate`, and both `starting_batter_form.py` and
+`starting_pitcher_form.py` passed the game's own date as `endDate`. So
+`woba_season`, `k_pct_*`, `bb_pct_*`, `mlb_pa_count` and the pitcher
+equivalents all included the game being predicted -- a batter's 4-for-4 was
+inside the wOBA a model would have used to predict that same game. The
+Statcast/SQL-sourced columns were never affected (`sql_helpers` filters
+`g.date < as_of_date`). Both modules now end their ranges the day before.
+**Any form rows written before this commit are contaminated and should be
+recomputed, not resumed onto.**
+
+**4. Dodgers home games had no weather, all season.** MLB's `/venues`
+endpoint now calls venue 22 "UNIQLO Field at Dodger Stadium" (sponsor
+rename) while the schedule still reports the game's venue as "Dodger
+Stadium", so the name-keyed coordinate lookup missed every game there.
+`game_conditions.venue_name_keys` now also registers the part after " at ",
+covering the whole "<Sponsor> Field at <Stadium>" pattern, and
+`park_factors.py` uses the same aliases. The durable fix is to key parks by
+venue id rather than name -- `games.venue` stores a name, so that's a schema
+change and is not done here.
+
+Also fixed: players who appear in a box score but were on no roster pull
+(668904, 506702 in 2025) had their lineup rows silently dropped by the
+foreign key, and triggered the row-by-row retry on nearly every chunk.
+`reference/players.ensure_players_exist` now fetches and inserts them before
+the lineup write, in both the backfill and the daily job.
+
+**Resuming:** `scripts/backfill.py --resume` skips games that already have
+form rows. It is off by default on purpose -- it is only safe when
+continuing an interrupted run of the *same* code, which is not the case
+across the lookahead fix above.
+
+**Still open, not fixed here:** the form stage still makes ~60 MLB Stats API
+calls per game (3 per batter, 3 per starting pitcher), which is roughly 3-4
+hours per season on its own. Batching those via
+`/people?personIds=...&hydrate=stats(...)` would cut it to a few calls per
+game; the league-wide `byDateRange` leaderboard is NOT a substitute (checked
+live -- it returns ~151 qualified players, not all ~900 batters, so bench
+players would go missing). Worth doing before backfilling 2021-2024, both
+for wall-clock and for GitHub Actions minutes.
+
 ## Known gaps and approximations (read before trusting a number)
 
 This was built and reviewed for logical correctness, but **could not be run

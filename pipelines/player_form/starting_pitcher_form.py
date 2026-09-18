@@ -57,13 +57,21 @@ def build_starting_pitcher_form_row(
     season_start = SEASON_START.format(season=season)
     career_start = debut_date or season_start
 
-    season_stat = get_player_stats_by_date_range(pitcher_id, "pitching", season_start, game_date)
-    # last-30-days window
     from datetime import date, timedelta
 
+    # LOOKAHEAD FIX (18 Sep 2026): same bug as starting_batter_form.py -- MLB's
+    # byDateRange endpoint is INCLUSIVE of endDate, so passing game_date meant
+    # the start being scored was counted in the "form coming into the start"
+    # numbers (a 7-inning shutout improved the ERA/K% the model would have used
+    # to predict that very start). Ends the day before now, matching what
+    # sql_helpers already enforced on the Statcast side.
+    as_of_end = (date.fromisoformat(game_date) - timedelta(days=1)).isoformat()
+
+    season_stat = get_player_stats_by_date_range(pitcher_id, "pitching", season_start, as_of_end)
+    # last-30-days window
     last30_start = (date.fromisoformat(game_date) - timedelta(days=30)).isoformat()
-    last30_stat = get_player_stats_by_date_range(pitcher_id, "pitching", last30_start, game_date)
-    career_stat = get_player_stats_by_date_range(pitcher_id, "pitching", career_start, game_date)
+    last30_stat = get_player_stats_by_date_range(pitcher_id, "pitching", last30_start, as_of_end)
+    career_stat = get_player_stats_by_date_range(pitcher_id, "pitching", career_start, as_of_end)
 
     k_pct_season, bb_pct_season = _k_bb_pct(season_stat)
     k_pct_30d, bb_pct_30d = _k_bb_pct(last30_stat)

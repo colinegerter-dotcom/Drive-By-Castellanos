@@ -8,13 +8,24 @@ counts and earned runs per game, so there's no need to aggregate 700k rows
 of pitch-level data just to answer "how many pitches has the bullpen thrown
 in 3 days."
 
-PERFORMANCE NOTE: this calls get_live_feed() once per lookback game, per
-team, per game being scored -- during a 5-season backfill the same game's
-box score gets refetched many times over (once for game_results.py, then
-again for every later game whose bullpen lookback window includes it).
-Worth adding a simple on-disk/DB cache of live-feed payloads by game_id
-before running a full backfill; not built yet, flagging so it's not a
-surprise when the first real backfill run is slow.
+PERFORMANCE, NOW FIXED (this was the thing that made a full backfill
+impossible): this used to call get_live_feed() once per lookback game, per
+team, per game being scored, with no caching. Because the season-long
+lookback window grows as the season goes on, the cost per game grew
+linearly and the cost per season grew QUADRATICALLY -- measured live on 18
+Sep 2026, form-table chunks went from ~9 minutes per 100 games early in
+the season to ~36 minutes per 100 games by game 1400, on track for ~15
+hours for one season against GitHub's 6-hour job cap. Roughly 400,000 HTTP
+fetches for a single season, nearly all of them refetching a box score
+already fetched.
+
+_pitching_lines_by_team now caches each game's parsed pitching lines by
+game_id (both teams at once, starters included -- the starter is filtered
+out per-team at read time, so the cache doesn't depend on who started).
+That makes it at most one fetch per game per run: ~2,500 for a season
+instead of ~400,000. Only the small parsed lines are kept, not the
+multi-MB live-feed payloads, so memory stays trivial; call clear_cache()
+between seasons anyway.
 
 HEURISTIC, FLAGGED: closer_available_flag has no clean data source. MLB
 doesn't publish "who is the closer" as a field -- it's a role inferred from
@@ -51,34 +62,63 @@ def _team_recent_game_ids(conn, team_id: int, as_of_date: str, season: int, days
         return [(r[0], str(r[1])) for r in cur.fetchall()]
 
 
+# game_id -> {team_id: [pitching lines, STARTER INCLUDED]}. See the module
+# docstring: this cache is the difference between a season backfill taking
+# ~15 hours and taking minutes.
+_PITCHING_LINES_CACHE: dict[int, dict[int, list[dict]]] = {}
+
+
+def clear_cache() -> None:
+    """Drop the cached box-score pitching lines. Call between seasons in a
+    multi-season backfill -- the cache is small per game, but there's no
+    reason to hold a finished season's worth of it."""
+    _PITCHING_LINES_CACHE.clear()
+
+
+def _pitching_lines_by_team(game_id: int) -> dict[int, list[dict]]:
+    """Every pitcher's line for BOTH teams in one game, parsed once and
+    cached. Starters are deliberately kept in here so the cache key is just
+    game_id -- callers filter their own team's starter out below."""
+    cached = _PITCHING_LINES_CACHE.get(game_id)
+    if cached is not None:
+        return cached
+
+    feed = get_live_feed(game_id)
+    teams_meta = (feed.get("gameData", {}).get("teams") or {})
+    box_teams = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+
+    by_team: dict[int, list[dict]] = {}
+    for side in ("home", "away"):
+        team_id = (teams_meta.get(side) or {}).get("id")
+        if team_id is None:
+            continue
+        lines = []
+        for entry in ((box_teams.get(side) or {}).get("players") or {}).values():
+            pid = (entry.get("person") or {}).get("id")
+            if pid is None:
+                continue
+            pitching = ((entry.get("stats") or {}).get("pitching")) or {}
+            if not pitching:
+                continue  # this player didn't pitch (position player entry)
+            lines.append(
+                {
+                    "pitcher_id": pid,
+                    "pitches_thrown": pitching.get("numberOfPitches", 0),
+                    "earned_runs": pitching.get("earnedRuns", 0),
+                    "outs": pitching.get("outs", 0),
+                    "saves": pitching.get("saves", 0),
+                }
+            )
+        by_team[team_id] = lines
+
+    _PITCHING_LINES_CACHE[game_id] = by_team
+    return by_team
+
+
 def _bullpen_pitching_lines(game_id: int, team_id: int, starter_id: int | None) -> list[dict]:
     """Per-relief-pitcher stat lines for one team in one game, excluding the starter."""
-    feed = get_live_feed(game_id)
-    game_data = feed.get("gameData", {})
-    home_id = ((game_data.get("teams") or {}).get("home") or {}).get("id")
-    side = "home" if home_id == team_id else "away"
-    team_box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(side, {})
-    players = team_box.get("players", {})
-
-    lines = []
-    for entry in players.values():
-        person = entry.get("person") or {}
-        pid = person.get("id")
-        if pid is None or pid == starter_id:
-            continue
-        pitching = ((entry.get("stats") or {}).get("pitching")) or {}
-        if not pitching:
-            continue  # this player didn't pitch (position player entry)
-        lines.append(
-            {
-                "pitcher_id": pid,
-                "pitches_thrown": pitching.get("numberOfPitches", 0),
-                "earned_runs": pitching.get("earnedRuns", 0),
-                "outs": pitching.get("outs", 0),
-                "saves": pitching.get("saves", 0),
-            }
-        )
-    return lines
+    lines = _pitching_lines_by_team(game_id).get(team_id, [])
+    return [line for line in lines if line["pitcher_id"] != starter_id]
 
 
 def build_bullpen_status_row(

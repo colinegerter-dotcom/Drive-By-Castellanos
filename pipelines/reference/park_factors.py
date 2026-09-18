@@ -36,6 +36,7 @@ import logging
 import os
 
 from pipelines.config import ROOFED_PARKS
+from pipelines.games.game_conditions import venue_name_keys
 from pipelines.mlb_stats_client import get_venues
 from pipelines.savant_client import get_park_factors
 
@@ -99,9 +100,17 @@ def build_park_factor_rows(year: int) -> list[dict]:
         if park_id is None or name is None:
             continue
 
-        savant_row = savant_by_name.get(name)
-        orientation = None if name in ROOFED_PARKS else orientation_by_name.get(name)
-        if name not in orientation_by_name:
+        # Try each alias for this venue, not just the current (possibly
+        # sponsor-renamed) name -- see game_conditions.venue_name_keys. The
+        # orientation CSV and ROOFED_PARKS are both keyed by the everyday
+        # stadium name ("Dodger Stadium"), while /venues may now return
+        # "UNIQLO Field at Dodger Stadium".
+        name_keys = venue_name_keys(name)
+        savant_row = next((savant_by_name[k] for k in name_keys if k in savant_by_name), None)
+        matched_orientation_key = next((k for k in name_keys if k in orientation_by_name), None)
+        is_roofed = any(k in ROOFED_PARKS for k in name_keys)
+        orientation = None if is_roofed else orientation_by_name.get(matched_orientation_key)
+        if matched_orientation_key is None:
             unmatched_orientation.append(name)
 
         rows.append(

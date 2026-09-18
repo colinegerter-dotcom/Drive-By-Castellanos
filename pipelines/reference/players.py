@@ -51,6 +51,43 @@ def collect_player_ids_for_season(team_ids: list[int], season: int, extra_ids: s
     return sorted(ids)
 
 
+def ensure_players_exist(conn, player_ids, known_ids: set[int] | None = None) -> set[int]:
+    """Make sure every id in player_ids has a row in mlb.players, fetching and
+    inserting any that don't. Returns the set of ids now known to exist.
+
+    Why this is needed on top of the roster pulls: confirmed live twice now
+    (17-18 Sep 2026), MLB's `fullSeason` roster type does not return every
+    player who actually appears in a box score. The first case broke
+    games.home_starter_id's foreign key outright; the second showed up as
+    lineup rows being silently dropped for a couple of players (668904,
+    506702) on every one of their games -- ~100 lineup rows lost, plus the
+    row-by-row retry in db.upsert_rows firing on nearly every chunk, which
+    cost more wall-clock time than it saved data.
+
+    Callers pass `known_ids` (the ids they've already confirmed) so this
+    doesn't re-query the players table on every chunk.
+    """
+    from pipelines.db import upsert_rows  # local import: db imports nothing from here, keeps the cycle impossible
+
+    if known_ids is None:
+        with conn.cursor() as cur:
+            cur.execute("select player_id from mlb.players")
+            known_ids = {r[0] for r in cur.fetchall()}
+
+    missing = {pid for pid in player_ids if pid is not None} - known_ids
+    if not missing:
+        return known_ids
+
+    log.warning(
+        "%d player(s) appear in game data but weren't in mlb.players -- fetching them now: %s",
+        len(missing),
+        sorted(missing),
+    )
+    rows = build_player_rows(sorted(missing), {})
+    upsert_rows(conn, "players", rows, conflict_cols=["player_id"])
+    return known_ids | {r["player_id"] for r in rows}
+
+
 def build_player_rows(player_ids: list[int], current_team_by_player: dict[int, int]) -> list[dict]:
     """current_team_by_player: player_id -> team_id, built by the caller from
     the same roster pulls used in collect_player_ids_for_season (so a player

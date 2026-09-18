@@ -77,9 +77,19 @@ def build_starting_batter_form_row(
     career_start = debut_date or season_start
     last30_start = (date.fromisoformat(game_date) - timedelta(days=30)).isoformat()
 
-    season_stat = get_player_stats_by_date_range(batter_id, "hitting", season_start, game_date)
-    last30_stat = get_player_stats_by_date_range(batter_id, "hitting", last30_start, game_date)
-    career_stat = get_player_stats_by_date_range(batter_id, "hitting", career_start, game_date)
+    # LOOKAHEAD FIX (18 Sep 2026): these used to pass game_date itself as the
+    # end of the range. MLB's byDateRange endpoint is INCLUSIVE of endDate, so
+    # every one of these "form coming into the game" numbers silently included
+    # the game being predicted -- a batter's 4-for-4 showed up in the wOBA the
+    # model would have used to predict that same game. The SQL-sourced metrics
+    # in this module were always correct (sql_helpers filters `g.date <
+    # as_of_date`); it was only the official-stats calls that leaked. Ending
+    # the day BEFORE the game makes both sources agree on the same cutoff.
+    as_of_end = (date.fromisoformat(game_date) - timedelta(days=1)).isoformat()
+
+    season_stat = get_player_stats_by_date_range(batter_id, "hitting", season_start, as_of_end)
+    last30_stat = get_player_stats_by_date_range(batter_id, "hitting", last30_start, as_of_end)
+    career_stat = get_player_stats_by_date_range(batter_id, "hitting", career_start, as_of_end)
 
     k_pct_season, bb_pct_season = _k_bb_pct(season_stat)
     k_pct_30d, bb_pct_30d = _k_bb_pct(last30_stat)

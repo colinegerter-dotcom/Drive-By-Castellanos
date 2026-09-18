@@ -39,14 +39,20 @@ from dotenv import load_dotenv
 from pipelines.config import HISTORICAL_SEASONS
 from pipelines.db import get_conn, upsert_rows
 from pipelines.reference.teams import build_team_rows
-from pipelines.reference.players import collect_player_ids_for_season, build_player_rows
+from pipelines.reference.players import (
+    collect_player_ids_for_season,
+    build_player_rows,
+    ensure_players_exist,
+)
 from pipelines.reference.park_factors import build_park_factor_rows
 from pipelines.games.games import build_game_rows
 from pipelines.games.game_results import build_game_result_row, update_game_umpire
 from pipelines.games.lineup import build_lineup_rows
 from pipelines.games.game_conditions import build_game_condition_row, _venue_coords_by_name
 from pipelines.games.team_form import build_team_form_row
+from pipelines.games import bullpen_status
 from pipelines.games.bullpen_status import build_bullpen_status_row
+from pipelines import savant_client
 from pipelines.pitches.pitches import build_pitch_rows_for_range, date_chunks
 from pipelines.player_form.starting_pitcher_form import build_starting_pitcher_form_row
 from pipelines.player_form.starting_batter_form import build_starting_batter_form_row
@@ -142,7 +148,19 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
     lineup_rows_all: list[dict] = []
     condition_rows: list[dict] = []
 
+    # Every player already in mlb.players, so each chunk can cheaply spot the
+    # ones that appear in a box score but were never on a roster pull. See
+    # ensure_players_exist -- without this, those players' lineup rows are
+    # dropped by the foreign key and every chunk pays for a row-by-row retry.
+    with conn.cursor() as cur:
+        cur.execute("select player_id from mlb.players")
+        known_player_ids = {r[0] for r in cur.fetchall()}
+
     def _flush():
+        nonlocal known_player_ids
+        known_player_ids = ensure_players_exist(
+            conn, {r["player_id"] for r in lineup_rows_all}, known_player_ids
+        )
         upsert_rows(conn, "game_results", game_result_rows, conflict_cols=["game_id"])
         upsert_rows(conn, "lineup", lineup_rows_all, conflict_cols=["game_id", "team_id", "player_id"])
         upsert_rows(conn, "game_conditions", condition_rows, conflict_cols=["game_id"])
@@ -180,7 +198,7 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
     log.info("[%s] game_results/lineup/game_conditions done for %d games", season, len(game_rows))
 
 
-def backfill_form_tables(conn, season: int, game_rows: list[dict]):
+def backfill_form_tables(conn, season: int, game_rows: list[dict], resume: bool = False):
     """team_form, bullpen_status, starting_pitcher_form,
     starting_batter_form, umpire_stats -- all as-of the day before each
     game. Requires games/game_results/pitches already loaded for the season
@@ -223,6 +241,33 @@ def backfill_form_tables(conn, season: int, game_rows: list[dict]):
             starter_lookup[(gid, home_team)] = home_starter
             starter_lookup[(gid, away_team)] = away_starter
 
+    # --resume: skip games whose form rows are already committed. Because
+    # _flush() writes all four tables and commits together, a game present in
+    # team_form has its whole chunk done, so this is a clean restart point
+    # after a job that hit GitHub's 6-hour cap. NOT the default, deliberately:
+    # if the computation has changed since the interrupted run (as it did on
+    # 18 Sep 2026, when the lookahead fix changed every wOBA/K%/ERA figure),
+    # resuming would leave the table half old-logic and half new-logic. Only
+    # pass --resume when continuing an interrupted run of the SAME code.
+    already_done: set[int] = set()
+    if resume:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select distinct tf.game_id
+                from mlb.team_form tf
+                join mlb.games g on g.game_id = tf.game_id
+                where g.season = %s
+                """,
+                (season,),
+            )
+            already_done = {r[0] for r in cur.fetchall()}
+        log.info(
+            "[%s] --resume: %d games already have form rows, skipping them",
+            season,
+            len(already_done),
+        )
+
     team_form_rows: list[dict] = []
     bullpen_rows: list[dict] = []
     pitcher_form_rows: list[dict] = []
@@ -243,6 +288,12 @@ def backfill_form_tables(conn, season: int, game_rows: list[dict]):
     for i, g in enumerate(game_rows, 1):
         game_id, game_date = g["game_id"], g["date"]
         home_team, away_team = g["home_team"], g["away_team"]
+
+        if game_id in already_done:
+            if i % COMMIT_EVERY_N_GAMES == 0 or i == total_games:
+                _flush()
+                log.info("[%s] form tables: %d/%d games processed", season, i, total_games)
+            continue
 
         for team_id in (home_team, away_team):
             division = division_by_team.get(team_id)
@@ -302,11 +353,22 @@ def main():
     parser.add_argument("--seasons", nargs="+", type=int, default=HISTORICAL_SEASONS)
     parser.add_argument("--skip-pitches", action="store_true", help="skip the slow Statcast pull (debugging)")
     parser.add_argument("--skip-forms", action="store_true", help="skip form-table computation (debugging)")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip games that already have form rows (continue an interrupted run of the SAME code -- see backfill_form_tables)",
+    )
     args = parser.parse_args()
 
     load_dotenv()
 
     for season in args.seasons:
+        # Per-season, not per-run: the box-score and Savant caches are keyed
+        # by game/date within a season, so there's nothing to gain from
+        # carrying one season's entries into the next.
+        bullpen_status.clear_cache()
+        savant_client.clear_caches()
+
         game_rows = pull_season_games(season)
         starter_ids = {
             pid
@@ -323,7 +385,7 @@ def main():
         with get_conn() as conn:
             backfill_postgame(conn, season, game_rows)
             if not args.skip_forms:
-                backfill_form_tables(conn, season, game_rows)
+                backfill_form_tables(conn, season, game_rows, resume=args.resume)
 
 
 if __name__ == "__main__":
