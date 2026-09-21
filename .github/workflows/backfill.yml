@@ -8,10 +8,20 @@ on:
         required: true
         default: "2025"
       skip_pitches:
-        description: "Skip the slow Statcast pitch-level pull (fast validation run -- leave checked for a first test)"
+        description: "Skip the Statcast pitch-level pull"
+        required: true
+        type: boolean
+        default: false
+      skip_forms:
+        description: "Skip form-table computation (check this for a pitches-only load)"
         required: true
         type: boolean
         default: true
+      resume:
+        description: "Skip games that already have form rows (only safe if the code hasn't changed since the interrupted run)"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   backfill:
@@ -34,8 +44,9 @@ jobs:
           SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          if [ "${{ inputs.skip_pitches }}" = "true" ]; then
-            python scripts/backfill.py --seasons ${{ inputs.seasons }} --skip-pitches
-          else
-            python scripts/backfill.py --seasons ${{ inputs.seasons }}
-          fi
+          ARGS="--seasons ${{ inputs.seasons }}"
+          if [ "${{ inputs.skip_pitches }}" = "true" ]; then ARGS="$ARGS --skip-pitches"; fi
+          if [ "${{ inputs.skip_forms }}" = "true" ]; then ARGS="$ARGS --skip-forms"; fi
+          if [ "${{ inputs.resume }}" = "true" ]; then ARGS="$ARGS --resume"; fi
+          echo "Running: python scripts/backfill.py $ARGS"
+          python scripts/backfill.py $ARGS
