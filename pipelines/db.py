@@ -131,6 +131,31 @@ def upsert_rows(
             # which row(s) are bad so the rest of a good batch still lands,
             # instead of losing all of it over one row.
             cur.execute("ROLLBACK TO SAVEPOINT upsert_batch")
+
+            # WHICH ERRORS ARE WORTH ISOLATING (21 Sep 2026). Row-by-row retry
+            # only makes sense when the failure is genuinely about SOME rows:
+            # an IntegrityError (a foreign key to a player we haven't loaded, a
+            # constraint one row violates) is per-row by definition, and
+            # isolating it saves the rest of a good batch.
+            #
+            # Everything else is a property of the STATEMENT, not the data:
+            # ProgrammingError ("can't adapt type 'NAType'", a column that
+            # doesn't exist), OperationalError (connection gone), DataError (a
+            # value too wide for its column). Retrying those row by row asks
+            # the server the same broken question 26,000 times and gets the
+            # same answer. Measured live: a NAType adaptation bug burned four
+            # minutes and 1,307 round trips per chunk before the budget below
+            # stopped it, and wrote 260 of 26,133 rows. Fail fast instead --
+            # the loud error is the useful output, not the 1% that landed.
+            if not isinstance(exc, psycopg2.IntegrityError):
+                log.error(
+                    "batch upsert into %s.%s failed with %s: %s -- NOT retrying row by row "
+                    "(this is a statement/type problem, not a bad-row problem). "
+                    "All %d rows in this batch were dropped.",
+                    schema, table, type(exc).__name__, exc, len(normalized),
+                )
+                raise
+
             log.warning(
                 "batch upsert into %s.%s failed (%s: %s) -- retrying %d rows one at a time to isolate the bad ones",
                 schema, table, type(exc).__name__, exc, len(normalized),

@@ -16,7 +16,6 @@ be unique within a game, not globally, since the natural key is
 from __future__ import annotations
 
 import logging
-import math
 from datetime import date, timedelta
 
 import pandas as pd
@@ -32,14 +31,43 @@ SKIP_GAME_TYPES = {"S", "E", "A"}  # spring training, exhibition, all-star
 
 
 def _clean(value):
-    """NaN -> None. pybaseball/pandas fills missing numeric fields with NaN,
-    which psycopg2 will happily insert as the string 'NaN' unless we convert
-    it -- that's silent data corruption, not a null.
+    """Any pandas/numpy scalar -> a plain Python value psycopg2 can bind.
+
+    Does two jobs:
+
+    1. Missing -> None. Pandas has THREE ways to say "missing" and the old
+       version of this function only caught one of them:
+         - None
+         - float('nan')          -- classic float64 columns
+         - pd.NA (NAType)        -- pandas' nullable Int64/boolean/string
+                                    dtypes, which Savant's CSV now produces
+       pd.NA is NOT a float, so `isinstance(value, float) and isnan(value)`
+       sailed straight past it and handed psycopg2 an object it can't adapt.
+       Confirmed live 21 Sep 2026: every pitch batch died with
+       "ProgrammingError: can't adapt type 'NAType'", which then dragged the
+       whole batch into the row-by-row fallback and wrote ~1% of the data.
+       pd.isna() covers all three and is the only correct test here.
+
+    2. numpy scalar -> Python scalar. np.float64 subclasses float so
+       psycopg2 adapts it by luck, but np.int64 does NOT subclass int and
+       would hit the same "can't adapt" wall the moment a column comes back
+       as a nullable integer dtype. .item() unwraps both.
     """
     if value is None:
         return None
-    if isinstance(value, float) and math.isnan(value):
-        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        # pd.isna returns an array for list-likes rather than a bool. Nothing
+        # we store is list-like, so treat this as a genuine value.
+        pass
+    unwrap = getattr(value, "item", None)
+    if callable(unwrap):
+        try:
+            return unwrap()
+        except (AttributeError, ValueError):
+            pass
     return value
 
 
