@@ -4,24 +4,27 @@ on:
   workflow_dispatch:
     inputs:
       seasons:
-        description: "Seasons to backfill, space-separated (e.g. 2025 or 2021 2022 2023 2024 2025)"
+        description: "Seasons to backfill, space-separated"
         required: true
         default: "2025"
       skip_pitches:
-        description: "Skip the Statcast pitch-level pull"
+        description: "Skip the Statcast pitch pull (check this if the Parquet file already exists)"
         required: true
         type: boolean
         default: false
       skip_forms:
-        description: "Skip form-table computation (check this for a pitches-only load)"
+        description: "Skip form-table computation"
         required: true
         type: boolean
         default: true
       resume:
-        description: "Skip games that already have form rows (only safe if the code hasn't changed since the interrupted run)"
+        description: "Skip games that already have form rows"
         required: true
         type: boolean
         default: false
+
+permissions:
+  contents: write
 
 jobs:
   backfill:
@@ -35,6 +38,22 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Run offline tests
+        run: |
+          for t in tests/*.py; do echo "== $t"; python "$t" || exit 1; done
+
+      - name: Download existing pitch data
+        if: ${{ inputs.skip_pitches }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data
+          for S in ${{ inputs.seasons }}; do
+            gh release download "pitches-$S" -p "pitches_$S.parquet" -D data --clobber \
+              || echo "no release for $S yet"
+          done
+          ls -la data || true
 
       - name: Run backfill
         env:
@@ -50,3 +69,17 @@ jobs:
           if [ "${{ inputs.resume }}" = "true" ]; then ARGS="$ARGS --resume"; fi
           echo "Running: python scripts/backfill.py $ARGS"
           python scripts/backfill.py $ARGS
+
+      - name: Upload pitch data to a release
+        if: ${{ !inputs.skip_pitches }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for S in ${{ inputs.seasons }}; do
+            F="data/pitches_$S.parquet"
+            [ -f "$F" ] || { echo "no $F, skipping"; continue; }
+            gh release view "pitches-$S" >/dev/null 2>&1 \
+              || gh release create "pitches-$S" -t "Pitch data $S" -n "Statcast pitch-level data for $S"
+            gh release upload "pitches-$S" "$F" --clobber
+            echo "uploaded $F ($(du -h "$F" | cut -f1))"
+          done
