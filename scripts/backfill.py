@@ -56,6 +56,7 @@ from pipelines.games import bullpen_status
 from pipelines.games.bullpen_status import build_bullpen_status_row
 from pipelines import savant_client
 from pipelines.pitches.pitches import build_pitch_rows_for_range, date_chunks
+from pipelines import pitch_store
 from pipelines.player_form.starting_pitcher_form import build_starting_pitcher_form_row
 from pipelines.player_form.starting_batter_form import build_starting_batter_form_row, SEASON_START
 from pipelines.player_form.umpire_stats import build_umpire_stats_row, umpire_k_bb_rate, league_k_bb_rate
@@ -143,7 +144,53 @@ def _existing_game_ids(conn, game_ids: set[int]) -> set[int]:
         return {r[0] for r in cur.fetchall()}
 
 
+def backfill_pitches_to_parquet(season: int, known_game_ids: set[int]):
+    """Pull a season of Statcast pitches and write them to Parquet.
+
+    Replaces the Postgres path (21 Sep 2026). Pitches are the one table whose
+    shape suits columnar files rather than a row store -- see
+    pipelines/pitch_store.py for the full reasoning. Nothing is aggregated or
+    dropped: every pitch keeps its own row, which is what makes pitch-type,
+    sequencing and platoon features possible later.
+
+    known_game_ids comes from the schedule pull rather than a database query,
+    so this function needs no connection at all.
+    """
+    start, end = SEASON_DATE_RANGE[0].format(season=season), SEASON_DATE_RANGE[1].format(season=season)
+    total = 0
+    for i, (chunk_start, chunk_end) in enumerate(date_chunks(start, end, chunk_days=7), 1):
+        log.info("[%s] pitches %s..%s", season, chunk_start, chunk_end)
+        rows = build_pitch_rows_for_range(chunk_start, chunk_end)
+
+        # Same filter as the Postgres path had, for the same reason: Savant
+        # returns game types we don't keep. There's no foreign key to violate
+        # in Parquet, but a pitch whose game we have no row for can't be
+        # joined to a date, so it would silently vanish from every query
+        # anyway. Dropping it here makes the loss visible in the log.
+        if rows:
+            wanted = {r["game_id"] for r in rows}
+            unknown = wanted - known_game_ids
+            if unknown:
+                kept = [r for r in rows if r["game_id"] in known_game_ids]
+                log.warning(
+                    "[%s] %s..%s: dropped %d pitch rows across %d game_ids not in this season's schedule",
+                    season, chunk_start, chunk_end, len(rows) - len(kept), len(unknown),
+                )
+                rows = kept
+
+        pitch_store.write_chunk(rows, season, i)
+        total += len(rows)
+
+    out = pitch_store.consolidate_season(season)
+    log.info("[%s] pitches done: %d rows -> %s", season, total, out)
+    return out
+
+
 def backfill_pitches(conn, season: int):
+    """Legacy Postgres pitch load. Kept so an existing database can still be
+    topped up, but the backfill no longer calls it -- see
+    backfill_pitches_to_parquet above.
+    """
     start, end = SEASON_DATE_RANGE[0].format(season=season), SEASON_DATE_RANGE[1].format(season=season)
     total = 0
     for chunk_start, chunk_end in date_chunks(start, end, chunk_days=7):
@@ -243,7 +290,7 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
     log.info("[%s] game_results/lineup/game_conditions done for %d games", season, len(game_rows))
 
 
-def backfill_form_tables(conn, season: int, game_rows: list[dict], resume: bool = False):
+def backfill_form_tables(conn, pitches, season: int, game_rows: list[dict], resume: bool = False):
     """team_form, bullpen_status, starting_pitcher_form,
     starting_batter_form, umpire_stats -- all as-of the day before each
     game. Requires games/game_results/pitches already loaded for the season
@@ -419,7 +466,7 @@ def backfill_form_tables(conn, season: int, game_rows: list[dict], resume: bool 
         for pitcher_id in pitcher_ids:
             pitcher_form_rows.append(
                 build_starting_pitcher_form_row(
-                    conn, pitcher_id, game_id, game_date, season, debut_by_player.get(pitcher_id),
+                    pitches, pitcher_id, game_id, game_date, season, debut_by_player.get(pitcher_id),
                     prefetched={
                         "season": pit_season.get(pitcher_id),
                         "last30": pit_last30.get(pitcher_id),
@@ -431,7 +478,7 @@ def backfill_form_tables(conn, season: int, game_rows: list[dict], resume: bool 
         for batter_id in batter_ids:
             batter_form_rows.append(
                 build_starting_batter_form_row(
-                    conn, batter_id, game_id, game_date, season, debut_by_player.get(batter_id),
+                    pitches, batter_id, game_id, game_date, season, debut_by_player.get(batter_id),
                     prefetched={
                         "season": hit_season.get(batter_id),
                         "last30": hit_last30.get(batter_id),
@@ -452,11 +499,11 @@ def backfill_form_tables(conn, season: int, game_rows: list[dict], resume: bool 
     as_of_end = SEASON_DATE_RANGE[1].format(season=season)
     umpire_rows = []
     for ump_id in umpire_ids:
-        row = build_umpire_stats_row(conn, ump_id, season, as_of_end)
+        row = build_umpire_stats_row(pitches, ump_id, season, as_of_end)
         if row is None:
             continue
-        u_k, u_bb = umpire_k_bb_rate(conn, ump_id, season, as_of_end)
-        lg_k, lg_bb = league_k_bb_rate(conn, season, as_of_end)
+        u_k, u_bb = umpire_k_bb_rate(pitches, ump_id, season, as_of_end)
+        lg_k, lg_bb = league_k_bb_rate(pitches, season, as_of_end)
         row["k_rate_boost"] = round(u_k - lg_k, 1) if u_k is not None and lg_k is not None else None
         row["bb_rate_boost"] = round(u_bb - lg_bb, 1) if u_bb is not None and lg_bb is not None else None
         umpire_rows.append(row)
@@ -498,12 +545,20 @@ def main():
             backfill_reference(conn, season, extra_player_ids=starter_ids)
             backfill_games(conn, season, game_rows)
         if not args.skip_pitches:
-            with get_conn() as conn:
-                backfill_pitches(conn, season)
+            backfill_pitches_to_parquet(season, {g["game_id"] for g in game_rows})
+
         with get_conn() as conn:
             backfill_postgame(conn, season, game_rows)
             if not args.skip_forms:
-                backfill_form_tables(conn, season, game_rows, resume=args.resume)
+                # The pitch source is DuckDB over this season's Parquet file,
+                # opened once and reused for all ~101,000 pitch queries the
+                # form build makes. Postgres stays the writer; it just isn't
+                # the reader for pitch data any more.
+                pitches = pitch_store.open_pitch_source(season, game_rows)
+                try:
+                    backfill_form_tables(conn, pitches, season, game_rows, resume=args.resume)
+                finally:
+                    pitches.close()
 
 
 if __name__ == "__main__":

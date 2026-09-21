@@ -27,7 +27,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from pipelines.mlb_stats_client import get_player_stats_by_date_range
-from pipelines.player_form.sql_helpers import batter_events_query
+from pipelines.player_form.sql_helpers import batter_events_query, window_start
 
 SEASON_START = "{season}-03-01"
 
@@ -130,6 +130,11 @@ def build_starting_batter_form_row(
     k_pct_season, bb_pct_season = _k_bb_pct(season_stat)
     k_pct_30d, bb_pct_30d = _k_bb_pct(last30_stat)
 
+    # `conn` here is the pitch source (DuckDB over Parquet), not Postgres --
+    # see pipelines/pitch_store.py. It deliberately presents the same
+    # cursor/execute/fetchall surface, so this block is unchanged apart from
+    # the rolling window's lower bound now being computed in Python rather
+    # than with engine-specific interval SQL.
     with conn.cursor() as cur:
         cur.execute(
             batter_events_query(days=None),
@@ -138,7 +143,10 @@ def build_starting_batter_form_row(
         season_rows = cur.fetchall()
         cur.execute(
             batter_events_query(days=30),
-            {"player_id": batter_id, "season": season, "as_of_date": game_date, "days": 30},
+            {
+                "player_id": batter_id, "season": season, "as_of_date": game_date,
+                "since_date": window_start(game_date, 30),
+            },
         )
         last30_rows = cur.fetchall()
 

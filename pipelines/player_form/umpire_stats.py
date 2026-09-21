@@ -27,6 +27,8 @@ umpire_id games.py/game_results.py recorded as the plate umpire of record.
 """
 from __future__ import annotations
 
+from pipelines.player_form.sql_helpers import umpire_pitches_query
+
 
 def _in_zone(plate_x, plate_z, sz_top, sz_bot) -> bool | None:
     if None in (plate_x, plate_z, sz_top, sz_bot):
@@ -35,14 +37,10 @@ def _in_zone(plate_x, plate_z, sz_top, sz_bot) -> bool | None:
 
 
 def build_umpire_stats_row(conn, umpire_id: int, season: int, as_of_date: str) -> dict | None:
-    query = """
-        select p.pitch_result, p.plate_x, p.plate_z, p.sz_top, p.sz_bot, p.game_id
-        from mlb.pitches p
-        join mlb.games g on g.game_id = p.game_id
-        where g.umpire_id = %(umpire_id)s
-          and g.season = %(season)s
-          and g.date < %(as_of_date)s
-    """
+    # Still returns raw rows, deliberately: _in_zone() applies a strike-zone
+    # geometry test per pitch that isn't worth expressing in SQL, and this
+    # query is bounded by one umpire's ~30 games rather than the whole league.
+    query = umpire_pitches_query()
     with conn.cursor() as cur:
         cur.execute(query, {"umpire_id": umpire_id, "season": season, "as_of_date": as_of_date})
         rows = cur.fetchall()
@@ -107,38 +105,53 @@ def umpire_k_bb_rate(conn, umpire_id: int, season: int, as_of_date: str) -> tupl
     """This umpire's own K%/BB% (share of plate appearances they officiated
     that ended in a strikeout/walk), for comparison against league_k_bb_rate.
     """
+    # Counted in SQL rather than fetched row-by-row (21 Sep 2026). The old
+    # version pulled every plate-appearance-ending event into Python just to
+    # run three len()/sum() calls over it. Same arithmetic, but the engine
+    # returns one row instead of tens of thousands.
     query = """
-        select p.events
-        from mlb.pitches p
-        join mlb.games g on g.game_id = p.game_id
-        where g.umpire_id = %(umpire_id)s and g.season = %(season)s and g.date < %(as_of_date)s
+        select
+            count(*) as total,
+            count(*) filter (where p.events = 'strikeout') as ks,
+            count(*) filter (where p.events = 'walk') as bbs
+        from pitches p
+        join games g on g.game_id = p.game_id
+        where g.umpire_id = $umpire_id
+          and g.season = $season
+          and g.date < CAST($as_of_date AS DATE)
           and p.events is not null
     """
     with conn.cursor() as cur:
         cur.execute(query, {"umpire_id": umpire_id, "season": season, "as_of_date": as_of_date})
-        events = [r[0] for r in cur.fetchall()]
-    if not events:
+        total, ks, bbs = cur.fetchone()
+    if not total:
         return None, None
-    k = sum(1 for e in events if e == "strikeout")
-    bb = sum(1 for e in events if e == "walk")
-    return round(100 * k / len(events), 1), round(100 * bb / len(events), 1)
+    return round(100 * ks / total, 1), round(100 * bbs / total, 1)
 
 
 def league_k_bb_rate(conn, season: int, as_of_date: str) -> tuple[float | None, float | None]:
     """League-wide K%/BB% over the same season/date-range, as the baseline
     k_rate_boost / bb_rate_boost are measured against.
     """
+    # This is the single heaviest query in the whole form build: it covers
+    # EVERY pitch in the season to date and runs once per game (~2,477 times).
+    # Fetching the raw events to Python, as this used to, meant moving
+    # hundreds of millions of rows across a season. Counting in SQL turns
+    # each call into one returned row.
     query = """
-        select p.events
-        from mlb.pitches p
-        join mlb.games g on g.game_id = p.game_id
-        where g.season = %(season)s and g.date < %(as_of_date)s and p.events is not null
+        select
+            count(*) as total,
+            count(*) filter (where p.events = 'strikeout') as ks,
+            count(*) filter (where p.events = 'walk') as bbs
+        from pitches p
+        join games g on g.game_id = p.game_id
+        where g.season = $season
+          and g.date < CAST($as_of_date AS DATE)
+          and p.events is not null
     """
     with conn.cursor() as cur:
         cur.execute(query, {"season": season, "as_of_date": as_of_date})
-        events = [r[0] for r in cur.fetchall()]
-    if not events:
+        total, ks, bbs = cur.fetchone()
+    if not total:
         return None, None
-    k = sum(1 for e in events if e == "strikeout")
-    bb = sum(1 for e in events if e == "walk")
-    return round(100 * k / len(events), 1), round(100 * bb / len(events), 1)
+    return round(100 * ks / total, 1), round(100 * bbs / total, 1)
