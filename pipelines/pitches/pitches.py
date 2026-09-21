@@ -25,6 +25,11 @@ from pipelines.savant_client import pull_statcast_range
 
 log = logging.getLogger(__name__)
 
+# Must stay in sync with the same list in pipelines/games/games.py -- these
+# are the game types we do NOT create rows for in mlb.games, so pitch rows
+# pointing at them have nothing to reference.
+SKIP_GAME_TYPES = {"S", "E", "A"}  # spring training, exhibition, all-star
+
 
 def _clean(value):
     """NaN -> None. pybaseball/pandas fills missing numeric fields with NaN,
@@ -59,6 +64,27 @@ def build_pitch_rows_for_range(start_date: str, end_date: str) -> list[dict]:
     df: pd.DataFrame = pull_statcast_range(start_date, end_date)
     if df is None or df.empty:
         return []
+
+    # GAME-TYPE FILTER (21 Sep 2026). Savant returns pitches for spring
+    # training, exhibitions and the All-Star game; pipelines/games/games.py
+    # deliberately does NOT write rows for those types, so every such pitch
+    # row violates pitches_game_id_fkey. Left unfiltered this produced ~800
+    # FK failures in the first few chunks of a 2025 run (March is entirely
+    # spring training), which then triggered db.upsert_rows' row-by-row
+    # savepoint fallback thousands of times and exhausted Postgres' shared
+    # lock table ("out of shared memory"), taking the whole database offline.
+    # Dropping them here is the cheap fix; backfill_pitches ALSO filters
+    # against the games table, which is the belt-and-braces guarantee.
+    if "game_type" in df.columns:
+        before = len(df)
+        df = df[~df["game_type"].isin(SKIP_GAME_TYPES)]
+        if len(df) != before:
+            log.info(
+                "dropped %d non-regular/postseason pitch rows (%s) for %s..%s",
+                before - len(df), "/".join(sorted(SKIP_GAME_TYPES)), start_date, end_date,
+            )
+        if df.empty:
+            return []
 
     rows = []
     for _, r in df.iterrows():

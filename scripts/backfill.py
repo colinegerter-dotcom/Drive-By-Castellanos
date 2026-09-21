@@ -123,12 +123,55 @@ def backfill_games(conn, season: int, game_rows: list[dict]) -> list[dict]:
     return game_rows
 
 
+def _existing_game_ids(conn, game_ids: set[int]) -> set[int]:
+    """Which of these game_ids actually have a row in mlb.games?
+
+    One cheap query per chunk. Exists because Savant's date-range export
+    covers game types we intentionally don't store (see SKIP_GAME_TYPES in
+    pipelines/pitches/pitches.py) and, more generally, because ANY pitch row
+    whose game is missing is an FK violation -- and an FK violation inside a
+    large batch is what triggers the row-by-row savepoint fallback that took
+    the database down on 21 Sep 2026. Cheaper to ask first than to fail.
+    """
+    if not game_ids:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT game_id FROM mlb.games WHERE game_id = ANY(%s)",
+            (list(game_ids),),
+        )
+        return {r[0] for r in cur.fetchall()}
+
+
 def backfill_pitches(conn, season: int):
     start, end = SEASON_DATE_RANGE[0].format(season=season), SEASON_DATE_RANGE[1].format(season=season)
+    total = 0
     for chunk_start, chunk_end in date_chunks(start, end, chunk_days=7):
         log.info("[%s] pitches %s..%s", season, chunk_start, chunk_end)
         rows = build_pitch_rows_for_range(chunk_start, chunk_end)
+
+        # Drop rows whose game isn't in mlb.games rather than letting Postgres
+        # reject them. See _existing_game_ids above.
+        if rows:
+            wanted = {r["game_id"] for r in rows}
+            known = _existing_game_ids(conn, wanted)
+            if len(known) != len(wanted):
+                kept = [r for r in rows if r["game_id"] in known]
+                log.warning(
+                    "[%s] %s..%s: dropped %d pitch rows across %d game_ids with no row in mlb.games",
+                    season, chunk_start, chunk_end, len(rows) - len(kept), len(wanted - known),
+                )
+                rows = kept
+
         upsert_rows(conn, "pitches", rows, conflict_cols=["game_id", "at_bat_id", "pitch_number"])
+        total += len(rows)
+
+        # Commit after every chunk. Without this the entire ~700k-row season
+        # load sits in one uncommitted transaction: a single failure loses all
+        # of it, and every subtransaction the fallback path opens stays pinned
+        # in shared memory until commit. Chunk-sized transactions bound both.
+        conn.commit()
+        log.info("[%s] committed pitches through %s (%d rows this season so far)", season, chunk_end, total)
 
 
 def backfill_postgame(conn, season: int, game_rows: list[dict]):

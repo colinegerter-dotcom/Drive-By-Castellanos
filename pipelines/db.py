@@ -135,8 +135,28 @@ def upsert_rows(
                 "batch upsert into %s.%s failed (%s: %s) -- retrying %d rows one at a time to isolate the bad ones",
                 schema, table, type(exc).__name__, exc, len(normalized),
             )
+            # FALLBACK BUDGET (21 Sep 2026 -- added after this path took the
+            # database offline). The row-by-row retry is the right tool for a
+            # handful of bad rows and exactly the wrong one for a batch that's
+            # bad end to end. Every SAVEPOINT opens a subtransaction, and
+            # Postgres does NOT release a subtransaction's lock-table entries
+            # on RELEASE -- it holds them until the OUTER transaction commits.
+            # A 2025 pitch load hit ~800 FK failures in the first chunks and
+            # opened tens of thousands of subtransactions inside one
+            # season-long transaction, exhausting the shared lock table. The
+            # server then rejected every connection, from this pipeline and
+            # from anything else, with "out of shared memory". That's a
+            # whole-database outage caused by an error-handling path.
+            #
+            # So: give up early instead. If the failures aren't a small
+            # minority, the batch is structurally wrong (missing parent rows,
+            # a schema mismatch) and retrying each row just multiplies the
+            # damage while producing the same failure N times in the log.
+            max_failures = max(25, len(normalized) // 20)  # 5% of the batch, floor of 25
             succeeded = 0
-            for row in normalized:
+            failed = 0
+            aborted = False
+            for i, row in enumerate(normalized):
                 cur.execute("SAVEPOINT upsert_row")
                 try:
                     cur.execute(query, row)
@@ -144,12 +164,29 @@ def upsert_rows(
                     succeeded += 1
                 except psycopg2.Error as row_exc:
                     cur.execute("ROLLBACK TO SAVEPOINT upsert_row")
-                    key_values = {c: row.get(c) for c in conflict_cols}
-                    log.warning(
-                        "skipped 1 row in %s.%s (conflict key %s): %s",
-                        schema, table, key_values, row_exc,
-                    )
-            log.info("upserted %d/%d rows into %s.%s (after row-by-row fallback)", succeeded, len(rows), schema, table)
+                    failed += 1
+                    if failed <= 10:  # don't write the same error 40,000 times
+                        key_values = {c: row.get(c) for c in conflict_cols}
+                        log.warning(
+                            "skipped 1 row in %s.%s (conflict key %s): %s",
+                            schema, table, key_values, row_exc,
+                        )
+                    if failed > max_failures:
+                        aborted = True
+                        log.error(
+                            "ABORTING row-by-row fallback for %s.%s: %d of the first %d rows failed "
+                            "(budget %d). The batch is broken at the source, not row-by-row. "
+                            "%d rows written, %d abandoned. Fix the caller rather than this batch.",
+                            schema, table, failed, i + 1, max_failures,
+                            succeeded, len(normalized) - (i + 1),
+                        )
+                        break
+            level = log.error if aborted else log.info
+            level(
+                "upserted %d/%d rows into %s.%s (%d failed%s)",
+                succeeded, len(rows), schema, table, failed,
+                ", fallback aborted early" if aborted else "",
+            )
             return succeeded
 
     log.info("upserted %d rows into %s.%s", len(rows), schema, table)
