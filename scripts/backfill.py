@@ -144,6 +144,32 @@ def _existing_game_ids(conn, game_ids: set[int]) -> set[int]:
         return {r[0] for r in cur.fetchall()}
 
 
+def games_for_pitch_source(conn, season: int) -> list[dict]:
+    """game_id / date / season / umpire_id, read from Postgres.
+
+    Deliberately NOT the schedule dicts that pull_season_games() returns.
+    Those never carry umpire_id: MLB doesn't publish the plate umpire before
+    a game, so games.py leaves it unset and update_game_umpire fills it in
+    from the box score during backfill_postgame.
+
+    Building DuckDB's games table from the schedule dicts therefore left
+    umpire_id NULL for all 2,477 games. Every umpire_stats query joined on
+    `g.umpire_id = $umpire_id`, matched nothing, and returned None -- so the
+    table came out EMPTY with no error anywhere. Confirmed live on the
+    21 Sep 2026 run. Reading from Postgres after the postgame phase is the
+    only source that actually has the umpire.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "select game_id, date, season, umpire_id from mlb.games where season = %s",
+            (season,),
+        )
+        return [
+            {"game_id": r[0], "date": r[1], "season": r[2], "umpire_id": r[3]}
+            for r in cur.fetchall()
+        ]
+
+
 def backfill_pitches_to_parquet(season: int, known_game_ids: set[int]):
     """Pull a season of Statcast pitches and write them to Parquet.
 
@@ -554,7 +580,11 @@ def main():
                 # opened once and reused for all ~101,000 pitch queries the
                 # form build makes. Postgres stays the writer; it just isn't
                 # the reader for pitch data any more.
-                pitches = pitch_store.open_pitch_source(season, game_rows)
+                # Read games from Postgres, not from game_rows -- see
+                # games_for_pitch_source for why (umpire_id).
+                pitches = pitch_store.open_pitch_source(
+                    season, games_for_pitch_source(conn, season)
+                )
                 try:
                     backfill_form_tables(conn, pitches, season, game_rows, resume=args.resume)
                 finally:

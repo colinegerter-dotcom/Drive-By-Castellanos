@@ -230,8 +230,24 @@ def open_pitch_source(season: int, game_rows: list[dict], root: Path = DATA_DIR)
     con.execute("CREATE INDEX idx_games_game_id ON games(game_id)")
 
     n_pitches = con.execute("SELECT count(*) FROM pitches").fetchone()[0]
+    n_umps = con.execute("SELECT count(umpire_id) FROM games").fetchone()[0]
     log.info(
-        "pitch source ready for %s: %d pitches from %s, %d games",
-        season, n_pitches, path.name, len(game_rows),
+        "pitch source ready for %s: %d pitches from %s, %d games, %d with an umpire",
+        season, n_pitches, path.name, len(game_rows), n_umps,
     )
+
+    # Loud warning rather than a silent empty table. Every umpire query joins
+    # on games.umpire_id, so if that column is all NULL the queries match
+    # nothing, every row builds as None, and umpire_stats ends up empty with
+    # no error raised anywhere -- which is exactly what happened on 21 Sep
+    # 2026 when these rows came from the pre-game schedule instead of from
+    # Postgres. Cheap check, and it names the fix.
+    if game_rows and n_umps == 0:
+        log.warning(
+            "NO games have an umpire_id -- umpire_stats will come out EMPTY. "
+            "These game rows almost certainly came from the pre-game schedule, "
+            "which never includes the plate umpire. Read them from mlb.games "
+            "instead (see games_for_pitch_source in scripts/backfill.py)."
+        )
+
     return PitchSource(con)

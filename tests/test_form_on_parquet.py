@@ -152,6 +152,22 @@ try:
     check("unknown umpire", build_umpire_stats_row(src, 999999, 2025, "2025-05-05"), None)
     check("...and rates are None", umpire_k_bb_rate(src, 999999, 2025, "2025-05-05"), (None, None))
 
+    print("\n5. games with no umpire_id produce NO umpire stats (the 21 Sep bug)")
+    # The pre-game schedule never carries umpire_id -- MLB doesn't publish the
+    # plate umpire in advance. Building the pitch source from those rows left
+    # every umpire query matching nothing, and umpire_stats came out empty
+    # with no error. This asserts the failure mode so it can't return unseen.
+    no_ump_games = [{**g, "umpire_id": None} for g in GAMES]
+    blind = pitch_store.open_pitch_source(2025, no_ump_games, root=tmp)
+    check("umpire row is None when umpire_id is NULL",
+          build_umpire_stats_row(blind, UMP, 2025, "2025-05-05"), None)
+    check("...and so are the rates",
+          umpire_k_bb_rate(blind, UMP, 2025, "2025-05-05"), (None, None))
+    # ...while the SAME fixture with umpire_id present does produce a row.
+    check("...but the same data WITH umpire_id does build a row",
+          build_umpire_stats_row(src, UMP, 2025, "2025-05-05") is not None, True)
+    blind.close()
+
     src.close()
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
