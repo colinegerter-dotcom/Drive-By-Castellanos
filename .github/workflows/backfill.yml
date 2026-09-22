@@ -13,12 +13,17 @@ on:
         type: boolean
         default: false
       skip_forms:
-        description: "Skip form-table computation"
+        description: "Skip form-table computation (leave UNCHECKED for a real backfill)"
         required: true
         type: boolean
-        default: true
+        default: false
+      skip_postgame:
+        description: "Skip postgame (game_results/lineup/conditions), ~28 min. ONLY for a season already loaded; the run aborts if it isn't"
+        required: true
+        type: boolean
+        default: false
       resume:
-        description: "Skip games that already have form rows"
+        description: "Skip games that already have form rows. UNSAFE if the code changed since the interrupted run - re-run clean instead"
         required: true
         type: boolean
         default: false
@@ -66,6 +71,7 @@ jobs:
           ARGS="--seasons ${{ inputs.seasons }}"
           if [ "${{ inputs.skip_pitches }}" = "true" ]; then ARGS="$ARGS --skip-pitches"; fi
           if [ "${{ inputs.skip_forms }}" = "true" ]; then ARGS="$ARGS --skip-forms"; fi
+          if [ "${{ inputs.skip_postgame }}" = "true" ]; then ARGS="$ARGS --skip-postgame"; fi
           if [ "${{ inputs.resume }}" = "true" ]; then ARGS="$ARGS --resume"; fi
           echo "Running: python scripts/backfill.py $ARGS"
           python scripts/backfill.py $ARGS
