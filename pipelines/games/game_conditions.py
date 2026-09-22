@@ -35,7 +35,7 @@ from datetime import datetime, timezone as dt_timezone
 import requests
 
 from pipelines.config import OPEN_METEO_ARCHIVE_URL, OPEN_METEO_FORECAST_URL, ROOFED_PARKS
-from pipelines.mlb_stats_client import get_venues
+from pipelines.mlb_stats_client import get_venue_names_by_season, get_venues
 
 log = logging.getLogger(__name__)
 
@@ -65,18 +65,62 @@ def venue_name_keys(name: str) -> list[str]:
     return keys
 
 
-def _venue_coords_by_name() -> dict[str, tuple[float, float]]:
+def _venue_coords_by_name(seasons: list[int] | None = None) -> dict[str, tuple[float, float]]:
+    """Venue name -> (lat, lon), including names the park had in `seasons`.
+
+    `seasons` matters for any historical backfill. games.venue holds the
+    name as the schedule feed reported it at the time, while the venues
+    endpoint returns today's name, so a renamed park matches nothing and
+    its weather is skipped silently. Passing the season being backfilled
+    adds that season's names as extra keys pointing at the same
+    coordinates. See mlb_stats_client.get_venue_names_by_season for the
+    live evidence and the ~162 games it cost in 2021.
+
+    Omitting `seasons` keeps the old current-names-only behaviour, which
+    is correct for the daily pull (today's games use today's names).
+    """
     out: dict[str, tuple[float, float]] = {}
+    coords_by_id: dict[int, tuple[float, float]] = {}
+
     for v in get_venues():
         loc = (v.get("location") or {}).get("defaultCoordinates") or {}
         lat, lon = loc.get("latitude"), loc.get("longitude")
         name = v.get("name")
-        if not name or lat is None or lon is None:
+        if lat is None or lon is None:
+            continue
+        if v.get("id") is not None:
+            coords_by_id[v["id"]] = (lat, lon)
+        if not name:
             continue
         for key in venue_name_keys(name):
             # First writer wins so a real venue never gets clobbered by
             # another park's alias.
             out.setdefault(key, (lat, lon))
+
+    for season in seasons or []:
+        try:
+            names = get_venue_names_by_season(season)
+        except Exception:  # noqa: BLE001 -- an alias lookup must never break a backfill
+            log.warning(
+                "could not fetch %s venue names for historical aliases; parks renamed "
+                "since then will fall back to skipping weather (see "
+                "mlb_stats_client.get_venue_names_by_season)",
+                season,
+                exc_info=True,
+            )
+            continue
+
+        added = 0
+        for venue_id, name in names.items():
+            latlon = coords_by_id.get(venue_id)
+            if latlon is None:
+                continue
+            for key in venue_name_keys(name):
+                if key not in out:
+                    out[key] = latlon
+                    added += 1
+        log.info("[%s] venue name aliases added from historical names: %d", season, added)
+
     return out
 
 

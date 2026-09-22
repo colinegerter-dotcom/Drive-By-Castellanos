@@ -286,7 +286,11 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
     instead of one upsert (and one long-lived uncommitted transaction) per
     row -- see that constant's comment for why.
     """
-    coords_cache = _venue_coords_by_name()
+    # Pass the season so parks renamed since then still resolve. Without it,
+    # a 2021 backfill looks up "Guaranteed Rate Field" against a venue list
+    # that only knows "Rate Field" and skips the weather for every White Sox
+    # home game without failing. See get_venue_names_by_season.
+    coords_cache = _venue_coords_by_name(seasons=[season])
     # Keyed by venue NAME (not park_id) -- matches how park_factors.py itself
     # resolves orientation, and avoids a name->id->name round trip here.
     from pipelines.reference.park_factors import _load_orientation_by_name

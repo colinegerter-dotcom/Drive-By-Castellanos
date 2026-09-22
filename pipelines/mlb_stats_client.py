@@ -340,9 +340,51 @@ def get_venues() -> list[dict]:
     """All MLB venues, hydrated with lat/long -- used to seed park lookups
     (park_factors.park_id and the coordinates game_conditions.py needs to
     query Open-Meteo).
+
+    Returns venues under their CURRENT names. For historical seasons see
+    get_venue_names_by_season() -- parks get renamed, and a name-keyed
+    lookup against this list silently misses every game at a park whose
+    sponsor changed since.
     """
     data = _get(f"{MLB_STATS_API_BASE}/venues", {"hydrate": "location"})
     return data.get("venues", [])
+
+
+def get_venue_names_by_season(season: int) -> dict[int, str]:
+    """venue_id -> that venue's name AS OF `season`.
+
+    Exists because games.venue stores a NAME, captured from the schedule
+    feed at the time the game was played, while get_venues() returns names
+    as they are today. When a park is renamed, the two stop matching and
+    every name-keyed lookup for that park silently falls through.
+
+    Found live on 22 Sep 2026 during the 2021 backfill: the log filled up
+    with "no coordinates for venue 'Guaranteed Rate Field'" and
+    "'Minute Maid Park'" -- the 2021 names of the parks now called Rate
+    Field and Daikin Park -- and weather was skipped for roughly 162 games,
+    about 6.7% of the season. Same class of bug as the "UNIQLO Field at
+    Dodger Stadium" miss that venue_name_keys() was written for, but caused
+    by a rename across seasons rather than a sponsor prefix, so
+    venue_name_keys could not catch it.
+
+    VERIFIED LIVE 22 Sep 2026 that the `season` parameter is actually
+    honored here, rather than being silently ignored the way Savant ignores
+    its date bounds: `/venues?season=2021` returns venue id 4 as
+    "Guaranteed Rate Field" and id 2392 as "Minute Maid Park", i.e. the
+    2021 names, not today's. Worth re-checking if this ever stops helping.
+
+    `fields` keeps the response small -- this is called once per season per
+    build and only the id/name pairs are wanted.
+    """
+    data = _get(
+        f"{MLB_STATS_API_BASE}/venues",
+        {"season": season, "sportId": 1, "fields": "venues,id,name"},
+    )
+    return {
+        v["id"]: v["name"]
+        for v in data.get("venues", [])
+        if v.get("id") is not None and v.get("name")
+    }
 
 
 def get_live_feed(game_pk: int) -> dict:

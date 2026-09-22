@@ -88,7 +88,7 @@ import os
 
 from pipelines.config import ROOFED_PARKS
 from pipelines.games.game_conditions import venue_name_keys
-from pipelines.mlb_stats_client import get_venues
+from pipelines.mlb_stats_client import get_venue_names_by_season, get_venues
 
 log = logging.getLogger(__name__)
 
@@ -259,6 +259,26 @@ def build_park_factor_rows(conn, year: int, available_seasons: set[int] | None =
     orientation_by_name = _load_orientation_by_name()
 
     seasons = lookback_seasons(year, available_seasons)
+
+    # Historical venue names for the lookback window. factor_by_venue below
+    # is keyed by whatever mlb.games.venue holds for those seasons, which is
+    # the name the park had THEN, while get_venues() returns the name it has
+    # NOW. Without this a renamed park silently gets a null factor -- the
+    # same failure that was skipping weather for ~162 games of 2021. Found
+    # and fixed 22 Sep 2026; see mlb_stats_client.get_venue_names_by_season.
+    historical_names_by_id: dict[int, set[str]] = {}
+    for season in seasons:
+        try:
+            for venue_id, name in get_venue_names_by_season(season).items():
+                historical_names_by_id.setdefault(venue_id, set()).add(name)
+        except Exception:  # noqa: BLE001 -- an alias lookup must never break a backfill
+            log.warning(
+                "[%s] could not fetch %s venue names for historical aliases; parks "
+                "renamed since then may get a null park factor",
+                year,
+                season,
+                exc_info=True,
+            )
     if not seasons:
         log.warning(
             "[%s] no prior seasons available, so park_factor_runs will be null for "
@@ -297,7 +317,13 @@ def build_park_factor_rows(conn, year: int, available_seasons: set[int] | None =
         # orientation CSV, ROOFED_PARKS and our own games.venue text are all
         # keyed by the everyday stadium name ("Dodger Stadium"), while
         # /venues may now return "UNIQLO Field at Dodger Stadium".
-        name_keys = venue_name_keys(name)
+        # Current name first, then any name this same venue id carried in the
+        # lookback seasons, so a rename doesn't cost the park its factor.
+        name_keys = list(venue_name_keys(name))
+        for historical in sorted(historical_names_by_id.get(park_id, set())):
+            for k in venue_name_keys(historical):
+                if k not in name_keys:
+                    name_keys.append(k)
 
         factor_key = next((k for k in name_keys if k in factor_by_venue), None)
         park_factor_runs = factor_by_venue.get(factor_key) if factor_key else None
