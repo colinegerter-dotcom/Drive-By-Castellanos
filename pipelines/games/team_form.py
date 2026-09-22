@@ -11,11 +11,14 @@ tables via SQL, not by re-pulling standings from the MLB API. Two reasons:
    which is exactly the dependency we want (this module MUST run after
    games.py + game_results.py have ingested the relevant date range).
 
-def_oaa_season (team defense) is the one field NOT computed from our own
-tables -- it comes from Savant's team OAA leaderboard (savant_client.py).
-See that module's docstring: whether Savant's date-bounding actually works
-is unverified (couldn't reach the live API from this environment). Until
-verified, treat def_oaa_season as a soft/unverified column.
+def_oaa_season is intentionally always null, and that is now a settled
+decision rather than an open item. Savant's OAA leaderboard was verified
+live on 22 Sep 2026 to silently ignore startDate/endDate -- it hands back
+season-final numbers for any date range requested, with no error. There is
+no no-lookahead way to read it, so we don't. See build_team_form_row's
+inline comment and savant_client.get_team_outs_above_average for the
+evidence. Everything else in this table remains computed from our own
+tables with an explicit `date < as_of_date` filter.
 
 games_back_playoff and clinched_or_eliminated_flag use the standard
 division-games-back formula and a simplified elimination heuristic
@@ -26,8 +29,6 @@ approximation, not exact BBWAA elimination-number math.
 from __future__ import annotations
 
 import logging
-
-from pipelines.savant_client import get_team_outs_above_average
 
 log = logging.getLogger(__name__)
 
@@ -95,17 +96,22 @@ def build_team_form_row(conn, team_id: int, game_id: int, game_date: str, season
     # Simplified heuristic, not an exact elimination-number calc -- see module docstring.
     clinched_or_eliminated = games_back > games_remaining or (leader[0] == team_id and games_back == 0 and games_remaining < 1)
 
+    # def_oaa_season is deliberately left null. It is NOT a "we didn't get
+    # around to it" null -- it is a null we are choosing on purpose.
+    #
+    # Verified live 22 Sep 2026: Savant's OAA leaderboard silently ignores
+    # startDate/endDate and returns season-final numbers for any date range
+    # asked of it (three ranges fetched, byte-identical responses). There is
+    # therefore no way to get an as-of, no-lookahead team defense number out
+    # of that endpoint. Populating this column from it would mean every row
+    # in the training set carried a defensive rating computed partly from
+    # the game being predicted and every game after it.
+    #
+    # get_team_outs_above_average() now raises if handed a through_date, so
+    # this can't be quietly reintroduced. If an as-of defensive metric is
+    # wanted, build it from the pitch-level Parquet, where we control the
+    # date bounds ourselves. See savant_client for the full write-up.
     def_oaa = None
-    try:
-        oaa_df = get_team_outs_above_average(season, through_date=game_date)
-        # Column name for the team identifier/value is unverified -- see
-        # savant_client.get_team_outs_above_average docstring.
-        if "team_id" in oaa_df.columns and "outs_above_average" in oaa_df.columns:
-            match = oaa_df[oaa_df["team_id"] == team_id]
-            if not match.empty:
-                def_oaa = float(match.iloc[0]["outs_above_average"])
-    except Exception:
-        log.exception("failed to pull team OAA for team=%s season=%s as_of=%s", team_id, season, game_date)
 
     return {
         "team_id": team_id,

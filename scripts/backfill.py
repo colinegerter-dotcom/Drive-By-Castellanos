@@ -104,8 +104,39 @@ def backfill_reference(conn, season: int, extra_player_ids: set[int] | None = No
     log.info("[%s] %d teams, %d players", season, len(team_rows), len(player_rows))
 
     log.info("[%s] park_factors", season)
-    park_rows = build_park_factor_rows(season)
+    # Signature changed 22 Sep 2026: park factors are now computed from our
+    # own games/game_results (Savant's leaderboard is confirmed dead -- see
+    # savant_client.get_park_factors), so this needs a connection.
+    #
+    # Ordering note: this runs BEFORE backfill_postgame for the current
+    # season, which is fine and intentional. A park factor for year Y uses
+    # ONLY seasons before Y, so it never wants this season's results and
+    # cannot be affected by them not being loaded yet. That is also what
+    # makes it safe under --skip-postgame.
+    park_rows = build_park_factor_rows(
+        conn, season, available_seasons=_seasons_with_results(conn)
+    )
     upsert_rows(conn, "park_factors", park_rows, conflict_cols=["park_id", "year"])
+
+
+def _seasons_with_results(conn) -> set[int]:
+    """Seasons that actually have completed results in the database.
+
+    Passed to build_park_factor_rows so its lookback window is intersected
+    with what exists, rather than querying for seasons that were never
+    backfilled. Cheap -- one grouped scan over a column we index on anyway.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct g.season
+            from mlb.games g
+            join mlb.game_results gr on gr.game_id = g.game_id
+            where gr.game_status = 'completed'
+              and gr.home_score_final is not null
+            """
+        )
+        return {int(r[0]) for r in cur.fetchall()}
 
 
 def pull_season_games(season: int) -> list[dict]:
@@ -539,17 +570,85 @@ def backfill_form_tables(conn, pitches, season: int, game_rows: list[dict], resu
     log.info("[%s] form tables done", season)
 
 
-def main():
+def _completed_result_count(conn, season: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select count(*)
+            from mlb.games g
+            join mlb.game_results gr on gr.game_id = g.game_id
+            where g.season = %(season)s
+              and gr.game_status = 'completed'
+              and gr.home_score_final is not null
+            """,
+            {"season": season},
+        )
+        return int(cur.fetchone()[0])
+
+
+# How much of a season's schedule must already have results before
+# --skip-postgame is allowed to skip. Not 100%: a handful of scheduled games
+# never produce a result (postponements that were never made up, ties in the
+# schedule feed), so an exact match would never be reachable.
+_POSTGAME_COVERAGE_FLOOR = 0.90
+
+
+def _require_postgame_loaded(conn, season: int, game_rows: list[dict]) -> None:
+    """Abort unless this season's postgame data is already in the database.
+
+    --skip-postgame exists to save ~28 minutes on a RE-run. Used on a season
+    that was never loaded, it would hand backfill_form_tables an empty
+    game_results table, and the form build would cheerfully produce a full
+    set of rows computed from nothing at all and log a clean finish. This
+    repo has been bitten by exactly that shape of failure three times (see
+    the build doc's standing lesson), so this fails loudly and early instead.
+    """
+    have = _completed_result_count(conn, season)
+    want = len(game_rows)
+    if want == 0:
+        raise SystemExit(f"[{season}] --skip-postgame: schedule pull returned no games; aborting.")
+
+    coverage = have / want
+    if coverage < _POSTGAME_COVERAGE_FLOOR:
+        raise SystemExit(
+            f"[{season}] --skip-postgame refused: only {have} of {want} scheduled games "
+            f"({coverage:.1%}) have completed results in the database, below the "
+            f"{_POSTGAME_COVERAGE_FLOOR:.0%} floor.\n"
+            f"  Skipping postgame here would build the form tables on missing data and "
+            f"report success.\n"
+            f"  Run this season WITHOUT --skip-postgame first, then use the flag on "
+            f"subsequent re-runs.\n"
+            f"  (Also expected to trip for a season still in progress, where much of the "
+            f"schedule simply hasn't been played yet -- don't use --skip-postgame there.)"
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Split out from main() so tests can assert on the flags without
+    running a backfill (tests/test_backfill_guards.py)."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--seasons", nargs="+", type=int, default=HISTORICAL_SEASONS)
     parser.add_argument("--skip-pitches", action="store_true", help="skip the slow Statcast pull (debugging)")
     parser.add_argument("--skip-forms", action="store_true", help="skip form-table computation (debugging)")
     parser.add_argument(
+        "--skip-postgame",
+        action="store_true",
+        help=(
+            "skip backfill_postgame (game_results, lineup, game_conditions), ~28 min per "
+            "season. ONLY for re-running a season whose postgame data is already loaded -- "
+            "the run aborts if it isn't, rather than building form tables on missing results."
+        ),
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="skip games that already have form rows (continue an interrupted run of the SAME code -- see backfill_form_tables)",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     load_dotenv()
 
@@ -574,7 +673,20 @@ def main():
             backfill_pitches_to_parquet(season, {g["game_id"] for g in game_rows})
 
         with get_conn() as conn:
-            backfill_postgame(conn, season, game_rows)
+            if args.skip_postgame:
+                # Guard, not a courtesy. backfill_form_tables reads
+                # game_results and lineup; if postgame never ran for this
+                # season, skipping it here would build every form table on
+                # absent data and report a clean finish -- the exact failure
+                # mode that produced bugs 6 and 7 in the build log. Refuse.
+                _require_postgame_loaded(conn, season, game_rows)
+                log.info(
+                    "[%s] skipping postgame (--skip-postgame); %d games already have results",
+                    season,
+                    _completed_result_count(conn, season),
+                )
+            else:
+                backfill_postgame(conn, season, game_rows)
             if not args.skip_forms:
                 # The pitch source is DuckDB over this season's Parquet file,
                 # opened once and reused for all ~101,000 pitch queries the

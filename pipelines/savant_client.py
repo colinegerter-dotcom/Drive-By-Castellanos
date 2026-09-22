@@ -91,59 +91,106 @@ def _read_savant_csv_optional(url: str, params: dict, what: str) -> pd.DataFrame
 
 
 def get_team_outs_above_average(year: int, through_date: str | None = None) -> pd.DataFrame:
-    """Team-level Outs Above Average for a season, optionally as-of a date.
+    """Season-final Outs Above Average from Savant. NOT usable as an as-of feature.
 
-    pybaseball's statcast_outs_above_average() is player-level only; this
-    hits the same leaderboard Savant serves at the "Team" grouping directly.
+    VERIFIED LIVE 22 Sep 2026 (browser, from Colin's machine, against
+    baseballsavant.mlb.com -- the check the previous docstring asked for).
+    Three findings, all reproducible:
 
-    NEEDS LIVE VALIDATION: `through_date` is intended to bound the
-    leaderboard to games through that date (so team_form.py can compute a
-    no-lookahead, as-of-yesterday defense number for historical backfill
-    rather than reusing the full season's final number on every game).
-    I could not confirm live whether Savant's leaderboard endpoint actually
-    honors a date-bounded query in this "Team" mode versus only whole-year
-    aggregates -- this repo's cloud environment can't reach baseballsavant.mlb.com
-    to check. If through_date turns out to be ignored, def_oaa_season will
-    silently be season-end data reused for every game in that season, which
-    IS a lookahead-bias violation -- verify this before trusting that column
-    for anything backtest-critical, and see team_form.py's docstring.
+    1. `type=Team` RETURNS ZERO DATA ROWS. Every variant tried
+       (`type=Team` with/without startYear+endYear, `split=no`, `team=`,
+       `min=q`, `playerType=Team`, lowercase `type=team`) returns HTTP 200
+       with a valid 365-byte CSV header and no rows at all. The team
+       grouping is simply not served by this CSV export any more. This
+       alone means def_oaa_season was never going to populate, which
+       matches what's in the database: the column is null everywhere.
 
-    PERFORMANCE: team_form.py calls this once per team per game, so a season
-    backfill asks for the same ~190 distinct as-of dates about 5,000 times.
-    The result is cached by (year, through_date), and failures degrade to an
-    empty frame rather than raising (team_form leaves def_oaa_season null and
-    moves on) -- which also means a Savant outage no longer produces one
-    60-second stall and one full traceback per team per game.
+    2. `type=Fielder` DOES work -- 256 player rows, 21,515 bytes, with a
+       `display_team_name` column. Team OAA is by definition the sum of its
+       fielders' OAA, so a team number can be rebuilt from this if wanted.
+
+    3. **`startDate` / `endDate` ARE SILENTLY IGNORED.** This is the
+       important one. Fetched `type=Fielder` three ways -- no date params,
+       bounded 2025-03-01..2025-05-01, and bounded 2025-03-01..2025-09-28 --
+       and all three responses were BYTE-IDENTICAL (21,515 bytes each,
+       same leading rows). A query asking for "through May 1" hands back
+       full-season numbers without any error or warning.
+
+    So the lookahead risk flagged in the old docstring is REAL and
+    CONFIRMED, not hypothetical. Any as-of call against this endpoint gets
+    season-final data -- data that includes the game being predicted and
+    every game after it -- while looking like it was correctly bounded.
+    Backfilling five seasons on top of that would have put a silent leak
+    under the entire training set, and the model would have looked better
+    for it.
+
+    Because of (3), passing `through_date` now RAISES rather than returning
+    quietly wrong data. That is deliberate: this repo's standing lesson is
+    that a silent partial/wrong write is worse than a crash, and an
+    as-of-bounded defensive metric is exactly the kind of thing that would
+    be wired back in months from now by someone who didn't read this. Fail
+    loudly instead.
+
+    If an as-of team-defense feature is wanted later, build it from the
+    pitch-level Parquet already in this repo (which IS correctly
+    date-bounded because we bound it ourselves), not from this endpoint.
     """
-    cache_key = (year, through_date)
+    if through_date is not None:
+        raise ValueError(
+            "get_team_outs_above_average(through_date=...) is not supported: Savant "
+            "silently ignores startDate/endDate on this leaderboard and returns "
+            "season-final numbers (verified live 22 Sep 2026 -- three date ranges, "
+            "byte-identical responses). Using it as an as-of feature would inject "
+            "lookahead bias into every row. See this function's docstring."
+        )
+
+    cache_key = (year, None)
     if cache_key in _oaa_cache:
         return _oaa_cache[cache_key]
 
-    params = {"type": "Team", "startYear": year, "endYear": year, "split": "no", "team": ""}
-    if through_date:
-        params["startDate"] = f"{year}-03-01"
-        params["endDate"] = through_date
+    # type=Fielder, not type=Team: the Team grouping returns a header and no
+    # rows (finding 1 above). Callers wanting a team number should aggregate
+    # by display_team_name.
+    params = {"type": "Fielder", "startYear": year, "endYear": year, "split": "no", "team": ""}
     df = _read_savant_csv_optional(
         "https://baseballsavant.mlb.com/leaderboard/outs_above_average",
         params,
-        what=f"team outs above average ({year} through {through_date or 'season end'})",
+        what=f"player outs above average ({year}, season-final)",
     )
     _oaa_cache[cache_key] = df
     return df
 
 
 def get_park_factors(year: int) -> pd.DataFrame:
-    """Savant's Statcast park factors leaderboard (HR factor, runs factor) for a season.
+    """DEAD ENDPOINT -- kept only so nothing silently re-wires itself to it.
 
-    Uses _read_savant_csv_optional, not _read_savant_csv -- see that
-    function's docstring for why (this specific leaderboard page has been
-    confirmed, live, to no longer return CSV via `csv=true`).
+    VERIFIED LIVE 22 Sep 2026 (browser, from Colin's machine). This
+    leaderboard cannot be scraped any more, by any of the routes tried:
+
+    - `&csv=true` returns `content-type: text/html`, a 98KB page, not CSV.
+      That is the ParserError ("Expected 1 fields ... saw 4") in the build
+      log -- pandas choking on HTML.
+    - The returned HTML contains NO park data at all. Searched it for
+      "Coors" and for "venue_id": neither appears. It is a pure shell.
+    - No `var data = [...]` blob in the page, no data-bearing array on
+      `window`, and no table in the rendered DOM containing any park name.
+    - The page's own JS bundle (statcast-park-factors.js) contains no data
+      fetch -- only navigation URLs to /leaderboard/statcast-venue.
+    - `/leaderboard/statcast-park-factors/api`, `/api/leaderboard/...`,
+      and `/leaderboard/park-factors` all 404.
+
+    park_factors.py no longer calls this. Park factors are now computed
+    in-house from our own games/game_results tables -- see
+    pipelines/reference/park_factors.py. That is a better source anyway:
+    no external dependency that can rot silently, and we control the
+    date-bounding so it cannot leak.
     """
-    return _read_savant_csv_optional(
-        "https://baseballsavant.mlb.com/leaderboard/statcast-park-factors",
-        {"type": "year", "year": year, "batSide": "", "stat": "index_wOBA", "condition": "All", "rolling": "no"},
-        what="park factors",
+    log.warning(
+        "get_park_factors() is a confirmed-dead endpoint (verified 22 Sep 2026) and "
+        "should not be used; park factors are computed in-house from our own game "
+        "results. See this function's docstring and pipelines/reference/park_factors.py."
     )
+    return pd.DataFrame()
 
 
 def pull_statcast_range(start_date: str, end_date: str) -> pd.DataFrame:
