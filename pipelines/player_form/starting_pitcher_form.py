@@ -34,12 +34,45 @@ NOT YET BUILT (flagged, not faked):
 """
 from __future__ import annotations
 
+import math
 import statistics
 
 from pipelines.mlb_stats_client import get_player_stats_by_date_range
 from pipelines.player_form.sql_helpers import pitcher_events_query
 
 SEASON_START = "{season}-03-01"  # generous lower bound covering earliest spring/opener dates
+
+
+def _rate_or_none(value) -> float | None:
+    """Parse one of MLB's rate-stat values into a float, or None.
+
+    The Stats API returns rate stats (era, whip, avg...) as STRINGS, and
+    when the rate is undefined it returns a placeholder instead of a number:
+    "-.--" for ERA with zero innings pitched, ".---" for batting average
+    with zero at-bats, and so on. Normal values like "3.45" were being
+    passed straight through and Postgres cast them fine, which is why this
+    went unnoticed until a placeholder arrived.
+
+    Found live 22 Sep 2026: the 2022 backfill died ~550 games into the form
+    build on `invalid input syntax for type numeric: "-.--"` for pitcher
+    605483 in game 661624, a pitcher whose season-to-date line had no
+    innings in it yet. db.upsert_rows correctly refused the batch rather
+    than dropping it silently (the bug-6 fix doing its job), which stopped
+    the run.
+
+    Undefined rate -> None, not 0.0 and not infinity. A pitcher with no
+    innings has no ERA; the model should see a missing value, not a
+    fabricated one. Real values are returned unchanged, so rows written
+    before this fix are identical to what it would produce.
+    """
+    if value is None:
+        return None
+    try:
+        out = float(value) if isinstance(value, (int, float)) else float(str(value).strip())
+    except ValueError:
+        return None
+    # "inf"/"nan" parse as floats but are just as undefined as "-.--".
+    return out if math.isfinite(out) else None
 
 
 def _k_bb_pct(stat: dict) -> tuple[float | None, float | None]:
@@ -158,8 +191,10 @@ def build_starting_pitcher_form_row(
     return {
         "pitcher_id": pitcher_id,
         "game_id": game_id,
-        "era_last_30d": last30_stat.get("era"),
-        "era_season": season_stat.get("era"),
+        # Parsed, not passed through: MLB sends "-.--" when there are no
+        # innings yet. See _rate_or_none.
+        "era_last_30d": _rate_or_none(last30_stat.get("era")),
+        "era_season": _rate_or_none(season_stat.get("era")),
         "fip": None,  # not yet built -- see module docstring
         "fip_season": None,
         "xfip": None,
