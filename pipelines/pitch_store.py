@@ -137,6 +137,90 @@ def consolidate_season(season: int, root: Path = DATA_DIR) -> Path | None:
     return out
 
 
+def merge_day(season: int, new_rows: list[dict], root: Path = DATA_DIR) -> Path | None:
+    """Merge one day's pitch rows into the season's consolidated Parquet file.
+
+    23 Sep 2026: this is the nightly counterpart to consolidate_season()
+    above. A full backfill writes many chunk files and consolidates them
+    once; the daily pull writes exactly one day's rows at a time and needs
+    to fold them into a file that may already hold months of the season.
+
+    New rows win on a natural-key collision (game_id, at_bat_id,
+    pitch_number) rather than being deduped away, on the assumption that a
+    re-run for an already-covered day is re-pulling because something about
+    the original pull was wrong (Savant does occasionally revise a call
+    after replay review). Everything else about the file -- one file per
+    season, zstd compression, sorted by the natural key for row-group
+    pruning -- matches consolidate_season() exactly, so PitchSource and
+    every downstream reader needs no changes to work with a file this
+    function wrote versus one consolidate_season() wrote.
+
+    Returns the season file's path, or None if there were no new rows and
+    no existing file to fall back to (nothing to read, nothing to write).
+    """
+    out = season_file(season, root)
+
+    if not new_rows:
+        log.info("no new pitch rows for season %s today -- leaving %s as-is", season, out)
+        return out if out.exists() else None
+
+    import duckdb
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    incoming = out.with_name(f"{out.stem}_incoming.parquet")
+    columns = {c: [r.get(c) for r in new_rows] for c in PITCH_COLUMNS}
+    pq.write_table(pa.table(columns), incoming, compression="zstd")
+
+    con = duckdb.connect()
+    try:
+        if out.exists():
+            # Written to a sibling path first, then swapped in with an atomic
+            # rename -- a crash mid-COPY must never leave the season file
+            # half-written, since every reader (including tomorrow night's
+            # run) treats its mere existence as "safe to open".
+            staged = out.with_suffix(".parquet.new")
+            con.execute(
+                """
+                COPY (
+                    SELECT * EXCLUDE (_src, _rn) FROM (
+                        SELECT *, row_number() OVER (
+                            PARTITION BY game_id, at_bat_id, pitch_number
+                            ORDER BY _src DESC
+                        ) AS _rn
+                        FROM (
+                            SELECT *, 0 AS _src FROM read_parquet($existing)
+                            UNION ALL
+                            SELECT *, 1 AS _src FROM read_parquet($incoming)
+                        )
+                    )
+                    WHERE _rn = 1
+                    ORDER BY game_id, at_bat_id, pitch_number
+                ) TO $out (FORMAT PARQUET, COMPRESSION ZSTD)
+                """,
+                {"existing": str(out), "incoming": str(incoming), "out": str(staged)},
+            )
+            staged.replace(out)
+        else:
+            con.execute(
+                "COPY (SELECT * FROM read_parquet($incoming) ORDER BY game_id, at_bat_id, pitch_number) "
+                "TO $out (FORMAT PARQUET, COMPRESSION ZSTD)",
+                {"incoming": str(incoming), "out": str(out)},
+            )
+        n = con.execute("SELECT count(*) FROM read_parquet($p)", {"p": str(out)}).fetchone()[0]
+    finally:
+        con.close()
+        incoming.unlink(missing_ok=True)
+
+    size_mb = out.stat().st_size / (1024 * 1024)
+    log.info(
+        "merged %d new pitch rows into %s (%d rows total, %.1f MB)",
+        len(new_rows), out, n, size_mb,
+    )
+    return out
+
+
 class _DuckCursor:
     """Quacks like a psycopg2 cursor.
 

@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-from pipelines.config import HISTORICAL_SEASONS
+from pipelines.config import HISTORICAL_SEASONS, SEASON_START_MD, SEASON_END_MD
 from pipelines.db import get_conn, upsert_rows
 from pipelines.reference.teams import build_team_rows
 from pipelines.reference.players import (
@@ -64,7 +64,10 @@ from pipelines.player_form.umpire_stats import build_umpire_stats_row, umpire_k_
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("backfill")
 
-SEASON_DATE_RANGE = ("{season}-03-01", "{season}-11-15")  # covers spring training cutoff through World Series
+# 23 Sep 2026: sourced from pipelines/config.py instead of hardcoded here, so
+# daily_pull.py's season guard and this range can't drift apart. Same values
+# as before (03-01 / 11-15), same .format(season=...) call sites below.
+SEASON_DATE_RANGE = (f"{{season}}-{SEASON_START_MD}", f"{{season}}-{SEASON_END_MD}")
 
 # How many games' worth of postgame/form-table work to accumulate in memory
 # before writing it as one batch and committing. Confirmed live (17 Sep

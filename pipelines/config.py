@@ -31,6 +31,16 @@ CENTRAL = ZoneInfo("America/Chicago")
 HISTORICAL_SEASONS = [2021, 2022, 2023, 2024, 2025]
 CURRENT_SEASON = 2026
 
+# Generous month-day bounds for "a game could plausibly be happening today" --
+# covers the earliest spring-training-adjacent date through the latest
+# realistic World Series date. Shared so there's one definition instead of
+# two that can drift apart: scripts/backfill.py's SEASON_DATE_RANGE builds
+# from these, and daily_pull.py uses them directly to skip the off-season
+# (23 Sep 2026) rather than running its API calls against an empty schedule
+# 365 days a year.
+SEASON_START_MD = "03-01"
+SEASON_END_MD = "11-15"
+
 # ---------------------------------------------------------------------------
 # National TV networks
 # ---------------------------------------------------------------------------
