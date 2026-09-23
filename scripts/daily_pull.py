@@ -106,6 +106,52 @@ def _games_for_pitch_source(conn, season: int) -> list[dict]:
         ]
 
 
+def _check_pitch_coverage(conn, pitches, season: int, yesterday: str, min_share: float = 0.9) -> None:
+    """Stop the run if the pitch file is missing most of the season.
+
+    23 Sep 2026: a manual run on the old workflow had no download step, so
+    merge_day() built a pitch file holding only yesterday's games. Nothing
+    failed. Every season/30-day Statcast stat (exit velo, barrel %, velo,
+    whiff %, ground ball %) came back null for 300 form rows, and those nulls
+    overwrote correct values the backfill had written. The workflow now fails
+    if the download fails, but this check guards the same hole from inside
+    the script, e.g. a local run with no data/ folder.
+
+    Compares games with pitch data against completed games before yesterday
+    in Postgres. 90% mirrors backfill.py's --skip-postgame guard. On opening
+    day there are no prior games, so it passes trivially.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select count(*) from mlb.game_results gr
+            join mlb.games g on g.game_id = gr.game_id
+            where g.season = %s and g.date < %s
+            """,
+            (season, yesterday),
+        )
+        prior_games = cur.fetchone()[0]
+    if not prior_games:
+        return
+    pitch_games = pitches.query(
+        "select count(distinct p.game_id) from pitches p "
+        "join games g on g.game_id = p.game_id "
+        "where g.date < CAST($d AS DATE)",
+        {"d": yesterday},
+    ).fetchone()[0]
+    log.info(
+        "pitch coverage check: %d of %d completed %s games before %s have pitch data",
+        pitch_games, prior_games, season, yesterday,
+    )
+    if pitch_games < min_share * prior_games:
+        raise RuntimeError(
+            f"pitch file covers only {pitch_games} of {prior_games} completed {season} games "
+            f"before {yesterday}. Form stats computed from it would be wrong or null and "
+            f"would overwrite good rows. Is data/pitches_{season}.parquet the full season "
+            f"file from the pitches-{season} release?"
+        )
+
+
 def run(today: str | None = None):
     load_dotenv()
     now_central = datetime.now(CENTRAL)
@@ -190,6 +236,7 @@ def run(today: str | None = None):
         # 23 Sep 2026, see the status page's decision log.
         pitches = open_pitch_source(season, _games_for_pitch_source(conn, season))
         try:
+            _check_pitch_coverage(conn, pitches, season, yesterday)
             log.info("processing yesterday's game results (%s)", yesterday)
             upsert_rows(conn, "games", yesterday_games, conflict_cols=["game_id"])
             coords_cache = _venue_coords_by_name()

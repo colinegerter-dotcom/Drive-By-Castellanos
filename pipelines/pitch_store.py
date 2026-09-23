@@ -64,6 +64,39 @@ PITCH_COLUMNS = [
     "events", "bb_type", "hit_location",
 ]
 
+# Canonical type for every column, matching what the 2021-2026 release files
+# already contain (checked 23 Sep 2026). Every write goes through
+# _canonical_select() below, so a file's shape no longer depends on what
+# pyarrow happens to infer from one batch of Python values: a day where a
+# column is entirely empty would otherwise be written as type NULL, and a day
+# where spin rate arrives as 2300.0 instead of 2300 would come out DOUBLE.
+PITCH_TYPES = {
+    "game_id": "BIGINT", "at_bat_id": "BIGINT", "pitch_number": "BIGINT",
+    "pitcher_id": "BIGINT", "batter_id": "BIGINT",
+    "inning": "BIGINT", "balls": "BIGINT", "strikes": "BIGINT",
+    "pitch_type": "VARCHAR", "release_speed": "DOUBLE", "spin_rate": "BIGINT",
+    "plate_x": "DOUBLE", "plate_z": "DOUBLE", "sz_top": "DOUBLE", "sz_bot": "DOUBLE",
+    "pitch_result": "VARCHAR", "exit_velocity": "DOUBLE", "launch_angle": "BIGINT",
+    "events": "VARCHAR", "bb_type": "VARCHAR", "hit_location": "BIGINT",
+}
+assert list(PITCH_TYPES) == PITCH_COLUMNS, "PITCH_TYPES must list PITCH_COLUMNS in order"
+
+
+def _canonical_select(source_sql: str) -> str:
+    """SELECT exactly PITCH_COLUMNS, in order, each cast to its canonical type.
+
+    Selecting by name rather than `SELECT *` is the fix for the 23 Sep 2026
+    daily-pull failure. Any extra column in the source is dropped, most
+    importantly the `season` column DuckDB invents when it reads files from a
+    `season=<year>/` folder (hive partitioning, on by default). Every
+    consolidated release file from 2021-2026 carries that stray 22nd column,
+    and merge_day's UNION against a 21-column day of new rows failed with
+    "Set operations can only apply to expressions with the same number of
+    result columns".
+    """
+    cols = ", ".join(f"CAST({c} AS {PITCH_TYPES[c]}) AS {c}" for c in PITCH_COLUMNS)
+    return f"SELECT {cols} FROM {source_sql}"
+
 
 def season_dir(season: int, root: Path = DATA_DIR) -> Path:
     return root / "pitches" / f"season={season}"
@@ -119,8 +152,16 @@ def consolidate_season(season: int, root: Path = DATA_DIR) -> Path | None:
     out.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
     try:
+        # hive_partitioning=false plus the explicit column list: the chunks
+        # live under season=<year>/, and without both DuckDB adds a `season`
+        # column to the output. See _canonical_select. union_by_name covers
+        # chunks written with slightly different inferred types.
         con.execute(
-            "COPY (SELECT * FROM read_parquet($glob) ORDER BY game_id, at_bat_id, pitch_number) "
+            "COPY ("
+            + _canonical_select(
+                "read_parquet($glob, hive_partitioning=false, union_by_name=true)"
+            )
+            + " ORDER BY game_id, at_bat_id, pitch_number) "
             "TO $out (FORMAT PARQUET, COMPRESSION ZSTD)",
             {"glob": str(src / "chunk-*.parquet"), "out": str(out)},
         )
@@ -174,15 +215,21 @@ def merge_day(season: int, new_rows: list[dict], root: Path = DATA_DIR) -> Path 
     pq.write_table(pa.table(columns), incoming, compression="zstd")
 
     con = duckdb.connect()
+    staged = out.with_suffix(".parquet.new")
     try:
         if out.exists():
+            # Both sides go through _canonical_select, so the UNION always
+            # lines up column-for-column and type-for-type no matter what the
+            # existing file carries (e.g. the stray hive `season` column every
+            # backfill-built file has) or what pyarrow inferred for today.
+            existing_sql = _canonical_select("read_parquet($existing, hive_partitioning=false)")
+            incoming_sql = _canonical_select("read_parquet($incoming, hive_partitioning=false)")
             # Written to a sibling path first, then swapped in with an atomic
             # rename -- a crash mid-COPY must never leave the season file
             # half-written, since every reader (including tomorrow night's
             # run) treats its mere existence as "safe to open".
-            staged = out.with_suffix(".parquet.new")
             con.execute(
-                """
+                f"""
                 COPY (
                     SELECT * EXCLUDE (_src, _rn) FROM (
                         SELECT *, row_number() OVER (
@@ -190,9 +237,9 @@ def merge_day(season: int, new_rows: list[dict], root: Path = DATA_DIR) -> Path 
                             ORDER BY _src DESC
                         ) AS _rn
                         FROM (
-                            SELECT *, 0 AS _src FROM read_parquet($existing)
+                            SELECT *, 0 AS _src FROM ({existing_sql})
                             UNION ALL
-                            SELECT *, 1 AS _src FROM read_parquet($incoming)
+                            SELECT *, 1 AS _src FROM ({incoming_sql})
                         )
                     )
                     WHERE _rn = 1
@@ -201,17 +248,39 @@ def merge_day(season: int, new_rows: list[dict], root: Path = DATA_DIR) -> Path 
                 """,
                 {"existing": str(out), "incoming": str(incoming), "out": str(staged)},
             )
+
+            # Shrink guard. Merging can only add rows or replace rows with the
+            # same key, so the result can never have fewer rows than the file
+            # it started from. If it does, something upstream is badly wrong,
+            # and this file is about to be uploaded over the season's only
+            # copy on GitHub. Refuse, and leave the original untouched.
+            n_before = con.execute(
+                "SELECT count(*) FROM read_parquet($p, hive_partitioning=false)", {"p": str(out)}
+            ).fetchone()[0]
+            n_after = con.execute(
+                "SELECT count(*) FROM read_parquet($p, hive_partitioning=false)", {"p": str(staged)}
+            ).fetchone()[0]
+            if n_after < n_before:
+                raise RuntimeError(
+                    f"merge_day would shrink {out} from {n_before} to {n_after} rows; "
+                    f"refusing to replace it"
+                )
             staged.replace(out)
         else:
             con.execute(
-                "COPY (SELECT * FROM read_parquet($incoming) ORDER BY game_id, at_bat_id, pitch_number) "
+                "COPY ("
+                + _canonical_select("read_parquet($incoming, hive_partitioning=false)")
+                + " ORDER BY game_id, at_bat_id, pitch_number) "
                 "TO $out (FORMAT PARQUET, COMPRESSION ZSTD)",
                 {"incoming": str(incoming), "out": str(out)},
             )
-        n = con.execute("SELECT count(*) FROM read_parquet($p)", {"p": str(out)}).fetchone()[0]
+        n = con.execute(
+            "SELECT count(*) FROM read_parquet($p, hive_partitioning=false)", {"p": str(out)}
+        ).fetchone()[0]
     finally:
         con.close()
         incoming.unlink(missing_ok=True)
+        staged.unlink(missing_ok=True)
 
     size_mb = out.stat().st_size / (1024 * 1024)
     log.info(
@@ -294,7 +363,9 @@ def open_pitch_source(season: int, game_rows: list[dict], root: Path = DATA_DIR)
     # is inlined. It's a path this code constructed from an integer season,
     # never user input, and the quote-doubling keeps it well-formed anyway.
     literal_path = str(path).replace("'", "''")
-    con.execute(f"CREATE VIEW pitches AS SELECT * FROM read_parquet('{literal_path}')")
+    con.execute(
+        f"CREATE VIEW pitches AS SELECT * FROM read_parquet('{literal_path}', hive_partitioning=false)"
+    )
 
     # games as a real table, not a view: it's small, it's hit by every single
     # query, and materializing it once means DuckDB doesn't re-scan a Python
