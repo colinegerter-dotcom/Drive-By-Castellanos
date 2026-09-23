@@ -30,13 +30,39 @@ _STATUS_MAP = {
 }
 
 
-def _map_status(detailed_state: str | None) -> str | None:
+def _map_status(detailed_state: str | None, abstract_state: str | None = None) -> str | None:
+    """Map MLB's detailedState onto our 4 allowed game_status values, or None.
+
+    FIXED 23 Sep 2026. "Completed Early" used to be matched only as exact
+    text, but MLB appends the reason: "Completed Early: Rain", "Completed
+    Early: Wet Grounds". Those fell through to None, the caller logged "not
+    final yet" at INFO level, and 27 official rain-shortened games across
+    2021-2025 silently got no game_results row. They were filled by hand.
+    Same reasoning now applies to "Final: <reason>" variants.
+
+    Also new: if MLB says the game is over (abstractGameState "Final") and we
+    still can't map it, that is logged as a WARNING rather than folded into
+    the routine "not final yet" message, so the next unfamiliar label shows
+    up in the log instead of disappearing.
+    """
     if detailed_state in _STATUS_MAP:
         return _STATUS_MAP[detailed_state]
-    if detailed_state and "postpon" in detailed_state.lower():
+    lowered = (detailed_state or "").lower()
+    if "postpon" in lowered:
         return "postponed"
-    if detailed_state and "suspend" in detailed_state.lower():
+    if "suspend" in lowered:
         return "suspended"
+    if "cancel" in lowered:
+        # Never played. No result row is correct; say so plainly.
+        return None
+    if lowered.startswith("completed early") or lowered.startswith("final") or lowered.startswith("game over"):
+        return "completed"
+    if abstract_state == "Final":
+        log.warning(
+            "unrecognised detailedState %r on a game MLB marks Final -- no game_results "
+            "row written; add it to _STATUS_MAP if it is a real completed game",
+            detailed_state,
+        )
     # Anything still in-progress or unrecognized: don't force a bad value
     # into a CHECK-constrained column. Caller should skip writing a
     # game_results row at all until the game is actually final.
@@ -75,7 +101,8 @@ def build_game_result_row(game_pk: int) -> tuple[dict | None, int | None]:
     linescore = live_data.get("linescore", {})
     boxscore = live_data.get("boxscore", {})
 
-    status = _map_status((game_data.get("status") or {}).get("detailedState"))
+    status_obj = game_data.get("status") or {}
+    status = _map_status(status_obj.get("detailedState"), status_obj.get("abstractGameState"))
 
     home_team_id = ((game_data.get("teams") or {}).get("home") or {}).get("id")
     away_team_id = ((game_data.get("teams") or {}).get("away") or {}).get("id")
