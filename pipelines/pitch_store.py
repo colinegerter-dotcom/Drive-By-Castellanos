@@ -62,6 +62,12 @@ PITCH_COLUMNS = [
     "plate_x", "plate_z", "sz_top", "sz_bot",
     "pitch_result", "exit_velocity", "launch_angle",
     "events", "bb_type", "hit_location",
+    # 23 Sep 2026 additions -- see EXTRA_FIELD_SOURCES in
+    # pipelines/pitches/pitches.py for what each one is.
+    "pfx_x", "pfx_z", "release_extension", "release_pos_x", "release_pos_z",
+    "xba", "xwoba", "woba_value", "woba_denom",
+    "outs", "on_1b", "on_2b", "on_3b", "inning_topbot",
+    "home_score", "away_score", "bat_score", "fld_score", "delta_run_exp",
 ]
 
 # Canonical type for every column, matching what the 2021-2026 release files
@@ -78,11 +84,26 @@ PITCH_TYPES = {
     "plate_x": "DOUBLE", "plate_z": "DOUBLE", "sz_top": "DOUBLE", "sz_bot": "DOUBLE",
     "pitch_result": "VARCHAR", "exit_velocity": "DOUBLE", "launch_angle": "BIGINT",
     "events": "VARCHAR", "bb_type": "VARCHAR", "hit_location": "BIGINT",
+    "pfx_x": "DOUBLE", "pfx_z": "DOUBLE", "release_extension": "DOUBLE",
+    "release_pos_x": "DOUBLE", "release_pos_z": "DOUBLE",
+    "xba": "DOUBLE", "xwoba": "DOUBLE", "woba_value": "DOUBLE", "woba_denom": "BIGINT",
+    "outs": "BIGINT", "on_1b": "BIGINT", "on_2b": "BIGINT", "on_3b": "BIGINT",
+    "inning_topbot": "VARCHAR",
+    "home_score": "BIGINT", "away_score": "BIGINT", "bat_score": "BIGINT", "fld_score": "BIGINT",
+    "delta_run_exp": "DOUBLE",
 }
 assert list(PITCH_TYPES) == PITCH_COLUMNS, "PITCH_TYPES must list PITCH_COLUMNS in order"
 
 
-def _canonical_select(source_sql: str) -> str:
+def _file_columns(con, path) -> set[str]:
+    """Column names actually present in a Parquet file."""
+    rows = con.execute(
+        "DESCRIBE SELECT * FROM read_parquet($p, hive_partitioning=false)", {"p": str(path)}
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _canonical_select(source_sql: str, available: set[str] | None = None) -> str:
     """SELECT exactly PITCH_COLUMNS, in order, each cast to its canonical type.
 
     Selecting by name rather than `SELECT *` is the fix for the 23 Sep 2026
@@ -93,9 +114,20 @@ def _canonical_select(source_sql: str) -> str:
     and merge_day's UNION against a 21-column day of new rows failed with
     "Set operations can only apply to expressions with the same number of
     result columns".
+
+    available: the source's actual column names. Any canonical column the
+    source doesn't have comes out as a typed NULL. That is what lets the
+    nightly merge keep working on a season file written before the 23 Sep
+    2026 column additions, until that season is re-pulled: old pitches get
+    empty new fields, new pitches get real ones. Leave it None when the
+    source is known to have every column (a missing one then errors, which
+    is what you want there).
     """
-    cols = ", ".join(f"CAST({c} AS {PITCH_TYPES[c]}) AS {c}" for c in PITCH_COLUMNS)
-    return f"SELECT {cols} FROM {source_sql}"
+    def expr(c):
+        if available is not None and c not in available:
+            return f"CAST(NULL AS {PITCH_TYPES[c]}) AS {c}"
+        return f"CAST({c} AS {PITCH_TYPES[c]}) AS {c}"
+    return f"SELECT {', '.join(expr(c) for c in PITCH_COLUMNS)} FROM {source_sql}"
 
 
 def season_dir(season: int, root: Path = DATA_DIR) -> Path:
@@ -222,7 +254,17 @@ def merge_day(season: int, new_rows: list[dict], root: Path = DATA_DIR) -> Path 
             # lines up column-for-column and type-for-type no matter what the
             # existing file carries (e.g. the stray hive `season` column every
             # backfill-built file has) or what pyarrow inferred for today.
-            existing_sql = _canonical_select("read_parquet($existing, hive_partitioning=false)")
+            existing_sql = _canonical_select(
+                "read_parquet($existing, hive_partitioning=false)",
+                available=_file_columns(con, out),
+            )
+            missing_new = [c for c in PITCH_COLUMNS if c not in _file_columns(con, out)]
+            if missing_new:
+                log.warning(
+                    "%s predates %d pitch columns (%s...); older pitches will have them "
+                    "empty until the season is re-pulled",
+                    out.name, len(missing_new), ", ".join(missing_new[:3]),
+                )
             incoming_sql = _canonical_select("read_parquet($incoming, hive_partitioning=false)")
             # Written to a sibling path first, then swapped in with an atomic
             # rename -- a crash mid-COPY must never leave the season file

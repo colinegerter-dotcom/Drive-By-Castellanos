@@ -22,7 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import pandas as pd
 
-from pipelines.pitches.pitches import SKIP_GAME_TYPES, _clean, build_pitch_rows_for_range
+from pipelines.pitches.pitches import (
+    EXTRA_FIELD_SOURCES,
+    REQUIRED_SAVANT_COLUMNS,
+    SKIP_GAME_TYPES,
+    _clean,
+    build_pitch_rows_for_range,
+)
 import pipelines.pitches.pitches as pitches_mod
 
 failures = []
@@ -98,6 +104,11 @@ fake = pd.DataFrame({
     "inning":         pd.array([1, 1, 1, 3], dtype="Int64"),
 })
 
+# The build refuses a Savant table with any expected column absent (see
+# REQUIRED_SAVANT_COLUMNS), so pad this minimal fixture with empty columns.
+for col in REQUIRED_SAVANT_COLUMNS - set(fake.columns):
+    fake[col] = np.nan
+
 pitches_mod.pull_statcast_range = lambda s, e: fake
 rows = build_pitch_rows_for_range("2025-04-01", "2025-04-07")
 
@@ -122,6 +133,40 @@ check("natural key is ints", (rows[0]["game_id"], rows[0]["at_bat_id"], rows[0][
 # The specific crash, reproduced: pd.NA must never reach a row dict.
 na_leaks = [k for row in rows for k, v in row.items() if v is pd.NA]
 check("no pd.NA anywhere in the output", na_leaks, [])
+
+
+
+# --- 5. the 23 Sep 2026 fields --------------------------------------------
+print("\n5. movement, expected stats and game situation map from the right Savant columns")
+
+fake2 = fake.copy()
+fake2["pfx_x"] = [-0.5, 0.2, 0.0, 1.1]
+fake2["estimated_woba_using_speedangle"] = [np.nan, np.nan, np.nan, 0.412]
+fake2["outs_when_up"] = pd.array([0, 1, 0, 2], dtype="Int64")
+fake2["on_2b"] = pd.array([None, None, None, 660271], dtype="Int64")
+fake2["inning_topbot"] = ["Top", "Top", "Top", "Bot"]
+fake2["delta_run_exp"] = [-0.02, 0.05, 0.0, 0.31]
+pitches_mod.pull_statcast_range = lambda s, e: fake2
+rows2 = build_pitch_rows_for_range("2025-04-01", "2025-04-07")
+check("every extra field present in every row",
+      all(set(EXTRA_FIELD_SOURCES) <= set(r) for r in rows2), True)
+check("pfx_x", rows2[0]["pfx_x"], -0.5)
+check("xwoba from estimated_woba_using_speedangle", rows2[2]["xwoba"], 0.412)
+check("xwoba empty on a non-batted ball", rows2[0]["xwoba"], None)
+check("outs from outs_when_up", rows2[2]["outs"], 2)
+check_type("...as a plain int", rows2[2]["outs"], int)
+check("runner on second is a player id", rows2[2]["on_2b"], 660271)
+check("empty base is None", rows2[0]["on_2b"], None)
+check("half inning", rows2[2]["inning_topbot"], "Bot")
+check("run value", rows2[2]["delta_run_exp"], 0.31)
+
+print("\n6. a column Savant stopped sending stops the pull")
+pitches_mod.pull_statcast_range = lambda s, e: fake2.drop(columns=["pfx_z", "delta_run_exp"])
+try:
+    build_pitch_rows_for_range("2025-04-01", "2025-04-07")
+    check("raised", False, True)
+except RuntimeError as e:
+    check("raised, naming the columns", "delta_run_exp, pfx_z" in str(e), True)
 
 
 print("\n" + ("FAILED: " + "; ".join(failures) if failures else "ALL CHECKS PASSED"))

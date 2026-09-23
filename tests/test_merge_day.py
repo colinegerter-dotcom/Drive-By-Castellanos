@@ -84,16 +84,31 @@ def legacy_hive_file(tmp, season, rows):
     return out
 
 
+ORIGINAL_21 = pitch_store.PITCH_COLUMNS[:21]
+
+
+def pre_addition_file(tmp, season, rows):
+    """A season file exactly like the releases on GitHub before the 23 Sep
+    2026 column additions: the original 21 columns plus the stray hive
+    `season` column, and none of the new fields."""
+    out = pitch_store.season_file(season, tmp)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cols = {c: [r.get(c) for r in rows] for c in ORIGINAL_21}
+    cols["season"] = [season] * len(rows)
+    pq.write_table(pa.table(cols), out, compression="zstd")
+    return out
+
+
 def main():
     base = Path(tempfile.mkdtemp())
     try:
         print("1. merge into a release-shaped file with the stray `season` column (the 23 Sep failure)")
         tmp = base / "t1"
         f = legacy_hive_file(tmp, 2026, [row(1, 1, 1), row(1, 1, 2)])
-        check("legacy file has 22 columns", len(pq.read_schema(f)), 22)
+        check("legacy file has every column plus the stray `season`", len(pq.read_schema(f)), len(pitch_store.PITCH_COLUMNS) + 1)
         pitch_store.merge_day(2026, [row(2, 1, 1)], root=tmp)
         check("merged row count", count(f), 3)
-        check("merged schema is exactly the canonical 21 columns", schema_of(f), CANONICAL)
+        check("merged schema is exactly the canonical columns", schema_of(f), CANONICAL)
 
         print("2. consolidate_season no longer adds the `season` column")
         tmp = base / "t2"
@@ -213,6 +228,20 @@ def main():
             check("opening day (no prior games) passes", True, True)
         finally:
             src.close()
+
+        print("11. nightly merge into a season file that predates the new columns")
+        tmp = base / "t11"
+        check("original column list is the pre-addition 21", ORIGINAL_21[-1], "hit_location")
+        f = pre_addition_file(tmp, 2026, [row(1, 1, 1), row(1, 1, 2)])
+        check("old file has no new columns", "xwoba" in [x.name for x in pq.read_schema(f)], False)
+        pitch_store.merge_day(2026, [row(2, 1, 1, xwoba=0.35, pfx_x=-0.4, outs=1, inning_topbot="Top")], root=tmp)
+        check("merged schema has every column", schema_of(f), CANONICAL)
+        check("row count", count(f), 3)
+        got = duckdb.sql(f"select game_id, xwoba, pfx_x, outs, inning_topbot from read_parquet('{f}') order by game_id, pitch_number").fetchall()
+        check("old pitches empty in new fields, new pitch keeps them", got,
+              [(1, None, None, None, None), (1, None, None, None, None), (2, 0.35, -0.4, 1, "Top")])
+        check("old fields on old pitches untouched",
+              duckdb.sql(f"select release_speed from read_parquet('{f}') where game_id=1").fetchall(), [(95.0,), (95.0,)])
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
