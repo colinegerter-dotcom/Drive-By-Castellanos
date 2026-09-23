@@ -2,10 +2,17 @@ name: Daily MLB data pull
 
 on:
   schedule:
-    # 10:00 UTC = 5:00 AM Central (4:00 AM during DST) -- well after the last
-    # games end and before the day's slate needs pregame form tables.
-    - cron: "0 10 * * *"
+    # 11:00 UTC = 6:00 AM Central Daylight Time (the MLB season runs almost
+    # entirely within CDT; it's 5:00 AM Central Standard Time on the handful
+    # of season-window days outside DST). Moved from 5:00 AM CDT on 23 Sep
+    # 2026 for a wider buffer after a late West Coast game finishes. Runs
+    # every day of the year -- scripts/daily_pull.py is what skips the
+    # off-season, not this schedule (see its module docstring).
+    - cron: "0 11 * * *"
   workflow_dispatch: {}  # lets Colin trigger a manual run from the Actions tab
+
+permissions:
+  contents: write  # needed to read/write the pitches-<season> release asset
 
 jobs:
   daily-pull:
@@ -20,6 +27,43 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Determine current season
+        id: season
+        # Read from pipelines/config.py rather than hardcoding the year here,
+        # so bumping CURRENT_SEASON in one place (as the module docstring
+        # already says to do yearly) is the only edit a new season needs --
+        # this workflow picks it up automatically.
+        run: |
+          S=$(python -c "from pipelines.config import CURRENT_SEASON; print(CURRENT_SEASON)")
+          echo "season=$S" >> "$GITHUB_OUTPUT"
+
+      - name: Download existing pitch data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 23 Sep 2026: daily_pull.py no longer writes pitches to Postgres --
+        # it merges them into this season's Parquet file (see
+        # pipelines/pitch_store.py merge_day()). Unlike backfill.yml, this
+        # download is unconditional: every run needs the current file to
+        # merge into.
+        #
+        # If the release EXISTS, the download must succeed or the run stops
+        # here. Carrying on without the file is exactly what happened on the
+        # 23 Sep manual run (old workflow, no download step): merge_day()
+        # built a one-day file, every season/30-day Statcast stat computed
+        # as null, and those nulls overwrote good form rows. With the upload
+        # step below, it would also have replaced the full season file on
+        # GitHub with one day of pitches. Only a season with no release yet
+        # (first run before any backfill) is allowed to start from nothing.
+        run: |
+          mkdir -p data
+          S="${{ steps.season.outputs.season }}"
+          if gh release view "pitches-$S" >/dev/null 2>&1; then
+            gh release download "pitches-$S" -p "pitches_$S.parquet" -D data --clobber
+          else
+            echo "no release for $S yet -- merge_day will create it"
+          fi
+          ls -la data
+
       - name: Run daily pull
         env:
           SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
@@ -28,3 +72,23 @@ jobs:
           SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: python scripts/daily_pull.py
+
+      - name: Upload merged pitch data to the release
+        # Runs only if every step above succeeded. A failed run uploads
+        # nothing: a re-run re-pulls yesterday anyway, so skipping the upload
+        # loses nothing, while uploading after a failure risks publishing a
+        # bad file over a good one.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          F="data/pitches_${{ steps.season.outputs.season }}.parquet"
+          if [ -f "$F" ]; then
+            gh release view "pitches-${{ steps.season.outputs.season }}" >/dev/null 2>&1 \
+              || gh release create "pitches-${{ steps.season.outputs.season }}" \
+                   -t "Pitch data ${{ steps.season.outputs.season }}" \
+                   -n "Statcast pitch-level data for ${{ steps.season.outputs.season }}"
+            gh release upload "pitches-${{ steps.season.outputs.season }}" "$F" --clobber
+            echo "uploaded $F ($(du -h "$F" | cut -f1))"
+          else
+            echo "no $F on disk -- nothing to upload"
+          fi
