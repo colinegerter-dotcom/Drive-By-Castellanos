@@ -83,6 +83,12 @@ NATIONAL_TV_NETWORKS = {
 # (T-Mobile Park's roof happened to be open in the imagery, so its
 # orientation IS resolved, and it's still in this set).
 ROOFED_PARKS = {
+    # 24 Sep 2026: historical names added. The Astros' park was "Minute Maid
+    # Park" through 2024, so 2021-2024 games there never matched this set.
+    # No stored data was affected (its orientation is unresolved, so wind
+    # came out neutral anyway), but anything new keying on this set would
+    # have missed it. Prefer ROOFED_VENUE_IDS below, which can't go stale.
+    "Minute Maid Park", "Miller Park", "Marlins Park", "Safeco Field",
     "American Family Field",  # Brewers -- retractable
     "Chase Field",  # Diamondbacks -- retractable
     "Daikin Park",  # Astros -- retractable
@@ -91,6 +97,20 @@ ROOFED_PARKS = {
     "Rogers Centre",  # Blue Jays -- retractable
     "T-Mobile Park",  # Mariners -- retractable
     "Tropicana Field",  # Rays -- fixed dome
+}
+
+# Same parks by MLB venue id (verified against the schedule feed 24 Sep 2026:
+# each id carried both its old and new name across 2018-2026). Ids survive
+# renames, so this is the set to check whenever a venue id is available.
+ROOFED_VENUE_IDS = {
+    32,    # American Family Field / Miller Park -- Brewers
+    15,    # Chase Field -- Diamondbacks
+    2392,  # Daikin Park / Minute Maid Park -- Astros
+    5325,  # Globe Life Field -- Rangers
+    4169,  # loanDepot park / Marlins Park -- Marlins
+    14,    # Rogers Centre -- Blue Jays
+    680,   # T-Mobile Park / Safeco Field -- Mariners
+    12,    # Tropicana Field -- Rays (fixed dome)
 }
 
 # ---------------------------------------------------------------------------

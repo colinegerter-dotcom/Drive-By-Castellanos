@@ -276,6 +276,21 @@ def get_schedule(start_date: str, end_date: str, season: int | None = None) -> l
     return games
 
 
+def get_schedule_light(start_date: str, end_date: str, game_types: str = "R,F,D,L,W") -> list[dict]:
+    """Schedule without any hydration: ids, dates, status, venue id and the
+    resume fields. A whole season is one small call (the hydrated version
+    above is several MB), which is all the resumed-games list and the venue
+    id backfill need. Regular season plus postseason by default; spring
+    training and exhibitions are never stored.
+    """
+    params = {"sportId": 1, "startDate": start_date, "endDate": end_date, "gameType": game_types}
+    data = _get(f"{MLB_STATS_API_BASE}/schedule", params)
+    games: list[dict] = []
+    for d in data.get("dates", []):
+        games.extend(d.get("games", []))
+    return games
+
+
 def get_boxscore(game_pk: int) -> dict:
     """Post-game box score: actual starters, officials (umpires), lineups."""
     return _get(f"{MLB_STATS_API_BASE_V1_1}/game/{game_pk}/feed/live").get("liveData", {}).get(

@@ -132,6 +132,11 @@ def build_game_rows(start_date: str, end_date: str, season: int | None = None) -
                 "away_starter_id": (away.get("probablePitcher") or {}).get("id"),
                 "first_pitch_time": g.get("gameDate"),  # ISO8601 UTC string; Postgres casts to timestamptz
                 "venue": (g.get("venue") or {}).get("name"),
+                # 24 Sep 2026: the stable key for a park. Names change with
+                # sponsors (Minute Maid Park -> Daikin Park, Miller Park ->
+                # American Family Field); the id doesn't. park_factors.park_id
+                # is this same id.
+                "venue_id": (g.get("venue") or {}).get("id"),
                 "day_night": g.get("dayNight"),
                 "doubleheader_flag": g.get("doubleHeader") not in (None, "N"),
                 "national_tv_flag": _is_national_broadcast(g.get("broadcasts", [])),

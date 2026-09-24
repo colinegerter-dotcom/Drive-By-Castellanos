@@ -48,6 +48,7 @@ def upsert_rows(
     conflict_cols: Sequence[str],
     schema: str = "mlb",
     stamp_pulled_at: bool = True,
+    strict: bool = False,
 ) -> int:
     """Idempotent bulk upsert: INSERT ... ON CONFLICT (conflict_cols) DO UPDATE.
 
@@ -56,12 +57,22 @@ def upsert_rows(
     foreign keys pointing at this table. ON CONFLICT DO UPDATE is atomic
     and safe to re-run every day without creating duplicates -- which is
     the "daily pulls need idempotent upserts" rule from the schema doc.
+    (Where old rows must disappear, e.g. a corrected lineup, use
+    replace_game_rows below instead.)
 
     Every column that appears on ANY row in the batch is treated as a
     column to write; a row missing a given key gets NULL for that column.
     This keeps callers simple (they just build a dict per row) at the cost
     of assuming rows are reasonably uniform in shape, which holds for
     everything in this pipeline.
+
+    strict (24 Sep 2026, model design item A6): in the default mode a batch
+    with a few bad rows falls back to row-by-row and writes the good ones,
+    logging the rest. The function then returns normally, so a caller that
+    ignores the return value "succeeds" with rows missing -- the silent
+    partial write this project has been bitten by several times. strict=True
+    skips the fallback: any failure rolls this batch back and raises, so
+    nothing is written and the job fails loudly. All new writes use it.
 
     Returns the number of rows written.
     """
@@ -131,6 +142,14 @@ def upsert_rows(
             # which row(s) are bad so the rest of a good batch still lands,
             # instead of losing all of it over one row.
             cur.execute("ROLLBACK TO SAVEPOINT upsert_batch")
+
+            if strict:
+                log.error(
+                    "strict upsert into %s.%s failed with %s: %s -- nothing from this batch "
+                    "of %d rows was written",
+                    schema, table, type(exc).__name__, exc, len(normalized),
+                )
+                raise
 
             # WHICH ERRORS ARE WORTH ISOLATING (21 Sep 2026). Row-by-row retry
             # only makes sense when the failure is genuinely about SOME rows:
@@ -216,3 +235,64 @@ def upsert_rows(
 
     log.info("upserted %d rows into %s.%s", len(rows), schema, table)
     return len(rows)
+
+
+def replace_game_rows(
+    conn,
+    table: str,
+    game_id: int,
+    rows: Sequence[dict],
+    conflict_cols: Sequence[str],
+    schema: str = "mlb",
+    keep_cols: Sequence[str] = (),
+) -> tuple[int, int]:
+    """Delete every row for one game, then insert `rows` in its place.
+
+    Why this exists (24 Sep 2026): upsert_rows can add or overwrite rows but
+    never remove one. The lineup table held end-of-game lineups; fixing the
+    parser to return true starters would upsert the starters and leave every
+    wrongly-stored substitute in place. Delete-and-reinsert per game is the
+    only way a corrected set fully replaces the old one.
+
+    Both statements run inside one savepoint, so a failure restores the
+    game's old rows rather than leaving it empty. The insert is strict: any
+    bad row raises instead of being skipped.
+
+    keep_cols: hand-entered columns the pipeline never sets (the lineup
+    table's playing_through_injury_flag). Their current values are read
+    before the delete and carried onto the matching new row, so a rebuild
+    can't wipe something Colin typed in by hand.
+
+    Returns (rows deleted, rows inserted).
+    """
+    rows = [dict(r) for r in rows]
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT replace_game")
+        try:
+            if keep_cols:
+                key_sql = ", ".join(c for c in conflict_cols if c != "game_id")
+                keep_sql = ", ".join(keep_cols)
+                cur.execute(
+                    f"select {key_sql}, {keep_sql} from {schema}.{table} where game_id = %s",
+                    (game_id,),
+                )
+                other_keys = [c for c in conflict_cols if c != "game_id"]
+                kept = {}
+                for rec in cur.fetchall():
+                    key = tuple(rec[: len(other_keys)])
+                    vals = dict(zip(keep_cols, rec[len(other_keys):]))
+                    if any(v is not None for v in vals.values()):
+                        kept[key] = vals
+                for r in rows:
+                    key = tuple(r.get(c) for c in other_keys)
+                    for c, v in kept.get(key, {}).items():
+                        if v is not None:
+                            r[c] = v
+            cur.execute(f"delete from {schema}.{table} where game_id = %s", (game_id,))
+            deleted = cur.rowcount
+            inserted = upsert_rows(conn, table, rows, conflict_cols=conflict_cols, schema=schema, strict=True)
+            cur.execute("RELEASE SAVEPOINT replace_game")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT replace_game")
+            raise
+    return deleted, inserted

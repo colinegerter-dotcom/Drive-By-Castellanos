@@ -58,6 +58,11 @@ python scripts/backfill.py --seasons 2025 --skip-pitches
 # runs on a schedule -- see that file for why GitHub Actions rather than an
 # ad hoc script or Claude's own scheduled-task tooling):
 python scripts/daily_pull.py
+
+# Phase A data repair (24 Sep 2026): true starting lineups, bullpen
+# availability, venue ids, resumed games. Run from GitHub Actions ("Data
+# repair (manual)", .github/workflows/repair-data.yml), one job per season:
+python scripts/repair_data.py --seasons 2025 --steps venues resumed lineups batter_form bullpen
 ```
 
 For the GitHub Actions workflow to actually run, add these repo secrets
@@ -80,8 +85,10 @@ pipelines/
 scripts/
   backfill.py          historical backfill, season by season
   daily_pull.py         daily incremental job (see its docstring for step ordering)
-sql/migrations/0001_init.sql   the 13 in-scope tables, applied to Supabase already
-.github/workflows/daily-pull.yml
+  repair_data.py        one-off, re-runnable repairs (lineups, bullpen, venues, resumed games)
+  load_covers_odds.py   one-off load of the 2022-2026 Covers odds
+sql/migrations/        0001_init.sql (the 13 in-scope tables) through 0004; all applied to Supabase
+.github/workflows/     daily-pull.yml, backfill.yml, load-odds.yml, repair-data.yml
 ```
 
 ## Design notes worth knowing before touching this
@@ -96,10 +103,18 @@ the derived form tables in a second pass -- see that script's module
 docstring for why this ordering is safe rather than a shortcut.
 
 **Idempotent upserts**: every write goes through `pipelines/db.py`'s
-`upsert_rows()`, one shared `INSERT ... ON CONFLICT DO UPDATE` builder. This
-is also why `lineup.playing_through_injury_flag` (the one manual field in
-the schema) is safe from being silently overwritten by a re-pull -- see that
-module's docstring.
+`upsert_rows()`, one shared `INSERT ... ON CONFLICT DO UPDATE` builder.
+New writes pass `strict=True`, which raises on any bad row instead of
+skipping it (24 Sep 2026). Where stale rows must disappear (a corrected
+lineup), `replace_game_rows()` deletes and reinserts one game inside a
+savepoint, carrying `lineup.playing_through_injury_flag` (the one manual
+field in the schema) across, so a re-pull never wipes it.
+
+**Lineups are starters** (fixed 24 Sep 2026): each player's own box-score
+batting-order code ("300" started in slot 3, "301" replaced him), not the
+team's end-of-game batting order, which held substitutes. See
+`pipelines/games/lineup.py`; `pipelines/games/lineup_check.py` cross-checks
+against the pitch files.
 
 **Timestamps**: every timestamp column is Postgres `timestamptz`. That's
 the correct implementation of "timezone-aware, storing the UTC offset, no
@@ -150,8 +165,10 @@ Stadium", so the name-keyed coordinate lookup missed every game there.
 `game_conditions.venue_name_keys` now also registers the part after " at ",
 covering the whole "<Sponsor> Field at <Stadium>" pattern, and
 `park_factors.py` uses the same aliases. The durable fix is to key parks by
-venue id rather than name -- `games.venue` stores a name, so that's a schema
-change and is not done here.
+venue id rather than name. Started 24 Sep 2026: `games.venue_id` now exists
+and is filled (repair_data.py backfills it, the schedule pull sets it), and
+the roof check uses `config.ROOFED_VENUE_IDS`; the weather and park-factor
+lookups still go by name for now.
 
 Also fixed: players who appear in a box score but were on no roster pull
 (668904, 506702 in 2025) had their lineup rows silently dropped by the
@@ -382,7 +399,9 @@ here for visibility):**
   exact rulebook geometry calculation.
 - `bullpen_status.closer_available_flag` proxies "the closer" as whichever
   reliever has the team's most saves so far this season -- noisy for
-  committee-closer teams or early in a season.
+  committee-closer teams or early in a season. Since 24 Sep 2026 he's
+  unavailable only if he pitched each of the last two days or threw 25+
+  pitches yesterday (the same rules as `unavailable_reliever_ids`).
 
 **Performance, not correctness:** `bullpen_status.py` re-fetches a game's
 full box score (`get_live_feed`) once per lookback game per team per game

@@ -27,22 +27,53 @@ instead of ~400,000. Only the small parsed lines are kept, not the
 multi-MB live-feed payloads, so memory stays trivial; call clear_cache()
 between seasons anyway.
 
-HEURISTIC, FLAGGED: closer_available_flag has no clean data source. MLB
-doesn't publish "who is the closer" as a field -- it's a role inferred from
-usage. This implementation proxies it as: whichever reliever recorded the
-team's most saves so far this season is "the closer"; he's flagged
-unavailable if he pitched in the team's most recent completed game before
-as_of_date. This is a reasonable first pass, not authoritative -- a team
-using committee closers, or early in a season with few saves recorded yet,
-will get a noisier signal. Worth revisiting once the model is further along.
+AVAILABILITY RULES (rewritten 24 Sep 2026)
+The old back_to_back_appearances flag was TRUE whenever the team had played
+2+ games in the last 3 days (`len(dates) >= 1` on a non-empty list), so it
+was TRUE on 95.6% of rows and never looked at a single reliever. The rules
+now work per reliever and come from measured usage, not guesses. Relievers
+2022-2025, chance of pitching today given recent use (pitch files):
+
+    pitched each of the last 2 days          5.3%
+    pitched yesterday, 25+ pitches           5.7%
+    pitched yesterday, under 25 pitches     29.5%
+    pitched yesterday and 3 days ago        19.4%
+    none of the last 3 days                 39.6%
+
+So a reliever counts as UNAVAILABLE if he pitched on each of the last two
+calendar days, or threw HEAVY_PITCHES or more yesterday. Written per row:
+  back_to_back_appearances  any reliever pitched on each of the last 2 days
+  relievers_back_to_back    how many did
+  unavailable_reliever_ids  everyone meeting either rule, sorted
+  closer_available_flag     FALSE if the closer is in that list
+
+The model does not read this table (it computes availability from the pitch
+files, as a probability rather than a yes/no); these columns are for the
+card and for anyone querying the database.
+
+HEURISTIC, FLAGGED: MLB doesn't publish "who is the closer". The closer is
+proxied as the reliever with the team's most saves so far this season. A
+committee bullpen, or early season with few saves, gives a noisier signal.
+Before 24 Sep 2026 he was marked unavailable if he pitched in the team's
+most recent game at all, even when that game was 3 days earlier.
+
+KNOWN LIMIT: a resumed game's box score is filed under its ORIGINAL date,
+so relievers who pitched in the resumed part count as pitching on that
+date. 24 resumed games in 2021-2026 (see mlb.resumed_games).
 """
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 
 from pipelines.mlb_stats_client import get_live_feed
 
 log = logging.getLogger(__name__)
+
+# Pitches thrown yesterday at or above which a reliever is treated as
+# unavailable today. Relievers at 25+ pitched the next day 5.7% of the time
+# vs 29.5% under 25 (2022-2025). See the module docstring.
+HEAVY_PITCHES = 25
 
 
 def _team_recent_game_ids(conn, team_id: int, as_of_date: str, season: int, days: int) -> list[tuple[int, str]]:
@@ -75,7 +106,15 @@ def clear_cache() -> None:
     _PITCHING_LINES_CACHE.clear()
 
 
-def _pitching_lines_by_team(game_id: int) -> dict[int, list[dict]]:
+def prime_cache(game_id: int, feed: dict) -> None:
+    """Parse an already-fetched live feed into the cache, so a caller that
+    fetched the feed for another reason (the lineup rebuild) doesn't make
+    this module fetch it a second time."""
+    if game_id not in _PITCHING_LINES_CACHE:
+        _pitching_lines_by_team(game_id, feed=feed)
+
+
+def _pitching_lines_by_team(game_id: int, feed: dict | None = None) -> dict[int, list[dict]]:
     """Every pitcher's line for BOTH teams in one game, parsed once and
     cached. Starters are deliberately kept in here so the cache key is just
     game_id -- callers filter their own team's starter out below."""
@@ -83,7 +122,7 @@ def _pitching_lines_by_team(game_id: int) -> dict[int, list[dict]]:
     if cached is not None:
         return cached
 
-    feed = get_live_feed(game_id)
+    feed = feed if feed is not None else get_live_feed(game_id)
     teams_meta = (feed.get("gameData", {}).get("teams") or {})
     box_teams = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
 
@@ -143,8 +182,7 @@ def build_bullpen_status_row(
         total_er = 0
         total_outs = 0
         save_counts: dict[int, int] = {}
-        pitched_dates: set[str] = set()
-        for gid, gdate in game_ids_dates:
+        for gid, _gdate in game_ids_dates:
             lines = _bullpen_pitching_lines(gid, team_id, starter_lookup.get((gid, team_id)))
             for line in lines:
                 total_pitches += line["pitches_thrown"]
@@ -152,7 +190,6 @@ def build_bullpen_status_row(
                 total_outs += line["outs"]
                 if line["saves"]:
                     save_counts[line["pitcher_id"]] = save_counts.get(line["pitcher_id"], 0) + line["saves"]
-                    pitched_dates.add(gdate)
         return total_pitches, total_er, total_outs, save_counts
 
     pitches_3d, _, _, _ = aggregate(recent_3d)
@@ -165,28 +202,42 @@ def build_bullpen_status_row(
         innings = outs / 3.0
         return round((earned_runs * 9.0) / innings, 2)
 
+    # Per-reliever pitches by calendar day over the last 3 days. A
+    # doubleheader day counts once, with both games' pitches added up.
+    day1 = (date.fromisoformat(as_of_date) - timedelta(days=1)).isoformat()
+    day2 = (date.fromisoformat(as_of_date) - timedelta(days=2)).isoformat()
+    pitches_by_day: dict[int, dict[str, int]] = {}
+    for gid, gdate in recent_3d:
+        for line in _bullpen_pitching_lines(gid, team_id, starter_lookup.get((gid, team_id))):
+            days = pitches_by_day.setdefault(line["pitcher_id"], {})
+            days[gdate] = days.get(gdate, 0) + (line["pitches_thrown"] or 0)
+    unavailable = reliever_availability(pitches_by_day, day1, day2)
+
     # Closer proxy: pitcher with the most saves this season so far.
     closer_id = max(save_counts_season, key=save_counts_season.get) if save_counts_season else None
-    closer_available = True
-    if closer_id is not None and recent_3d:
-        most_recent_game_id, _ = recent_3d[0]
-        lines = _bullpen_pitching_lines(most_recent_game_id, team_id, starter_lookup.get((most_recent_game_id, team_id)))
-        if any(l["pitcher_id"] == closer_id for l in lines):
-            closer_available = False
-
-    back_to_back = False
-    if len(recent_3d) >= 2:
-        # crude proxy: did the team play (and use its pen) on each of the
-        # last two calendar days before as_of_date
-        dates = sorted({d for _, d in recent_3d[:2]})
-        back_to_back = len(dates) >= 1  # at minimum, pen worked yesterday; refine once travel_fatigue_score exists
+    closer_available = closer_id is None or closer_id not in unavailable["unavailable"]
 
     return {
         "team_id": team_id,
         "game_id": game_id,
         "pitches_thrown_last_3d": pitches_3d,
-        "back_to_back_appearances": back_to_back,
+        "back_to_back_appearances": bool(unavailable["back_to_back"]),
+        "relievers_back_to_back": len(unavailable["back_to_back"]),
+        "unavailable_reliever_ids": unavailable["unavailable"],
         "closer_available_flag": closer_available,
         "bullpen_era_last_15d": era(er_15d, outs_15d),
         "bullpen_era_season": era(er_season, outs_season),
     }
+
+
+def reliever_availability(pitches_by_day: dict[int, dict[str, int]], day1: str, day2: str) -> dict[str, list[int]]:
+    """Apply the availability rules to per-reliever daily pitch counts.
+
+    pitches_by_day: {pitcher_id: {"YYYY-MM-DD": pitches}} for the team's
+    relievers over recent days. day1 = yesterday, day2 = the day before.
+    Returns sorted id lists: "back_to_back" (pitched on both days) and
+    "unavailable" (back to back, or HEAVY_PITCHES+ yesterday).
+    """
+    b2b = sorted(pid for pid, days in pitches_by_day.items() if day1 in days and day2 in days)
+    heavy = {pid for pid, days in pitches_by_day.items() if days.get(day1, 0) >= HEAVY_PITCHES}
+    return {"back_to_back": b2b, "unavailable": sorted(set(b2b) | heavy)}

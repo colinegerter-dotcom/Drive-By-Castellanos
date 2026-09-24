@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 
 from pipelines.config import HISTORICAL_SEASONS, SEASON_START_MD, SEASON_END_MD
-from pipelines.db import get_conn, upsert_rows
+from pipelines.db import get_conn, replace_game_rows, upsert_rows
 from pipelines.reference.teams import build_team_rows
 from pipelines.reference.players import (
     collect_player_ids_for_season,
@@ -49,7 +49,7 @@ from pipelines.reference.park_factors import build_park_factor_rows
 from pipelines.games.games import build_game_rows
 from pipelines.mlb_stats_client import get_stats_by_date_range_bulk, get_career_totals_before_season
 from pipelines.games.game_results import build_game_result_row, update_game_umpire
-from pipelines.games.lineup import build_lineup_rows
+from pipelines.games.lineup import LINEUP_KEEP_COLS, LINEUP_KEY, build_lineup_rows, lineup_problems
 from pipelines.games.game_conditions import build_game_condition_row, _venue_coords_by_name
 from pipelines.games.team_form import build_team_form_row
 from pipelines.games import bullpen_status
@@ -301,7 +301,7 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
     orientation_by_venue_name = _load_orientation_by_name()
 
     game_result_rows: list[dict] = []
-    lineup_rows_all: list[dict] = []
+    lineup_rows_by_game: dict[int, list[dict]] = {}
     condition_rows: list[dict] = []
 
     # Every player already in mlb.players, so each chunk can cheaply spot the
@@ -315,14 +315,17 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
     def _flush():
         nonlocal known_player_ids
         known_player_ids = ensure_players_exist(
-            conn, {r["player_id"] for r in lineup_rows_all}, known_player_ids
+            conn, {r["player_id"] for rows in lineup_rows_by_game.values() for r in rows}, known_player_ids
         )
         upsert_rows(conn, "game_results", game_result_rows, conflict_cols=["game_id"])
-        upsert_rows(conn, "lineup", lineup_rows_all, conflict_cols=["game_id", "team_id", "player_id"])
+        # 24 Sep 2026: delete-and-reinsert per game, so a rebuilt lineup
+        # fully replaces the old one (upsert can't remove a stale row).
+        for lineup_game_id, rows in lineup_rows_by_game.items():
+            replace_game_rows(conn, "lineup", lineup_game_id, rows, LINEUP_KEY, keep_cols=LINEUP_KEEP_COLS)
         upsert_rows(conn, "game_conditions", condition_rows, conflict_cols=["game_id"])
         conn.commit()
         game_result_rows.clear()
-        lineup_rows_all.clear()
+        lineup_rows_by_game.clear()
         condition_rows.clear()
 
     total_games = len(game_rows)
@@ -332,7 +335,12 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
         update_game_umpire(conn, game_id, umpire_id)
         if result_row is not None:  # postponed/suspended/not yet played -> nothing else to write for this game
             game_result_rows.append(result_row)
-            lineup_rows_all.extend(build_lineup_rows(game_id))
+            lineup_rows = build_lineup_rows(game_id)
+            issues = lineup_problems(lineup_rows, [g["home_team"], g["away_team"]])
+            if issues:
+                log.warning("[%s] game %s lineup not written: %s", season, game_id, "; ".join(issues))
+            else:
+                lineup_rows_by_game[game_id] = lineup_rows
 
             orientation = orientation_by_venue_name.get(g["venue"])
             condition_row = build_game_condition_row(
@@ -343,6 +351,7 @@ def backfill_postgame(conn, season: int, game_rows: list[dict]):
                 is_forecast=False,
                 orientation_deg=orientation,
                 coords_cache=coords_cache,
+                venue_id=g.get("venue_id"),
             )
             if condition_row:
                 condition_rows.append(condition_row)

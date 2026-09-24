@@ -34,7 +34,7 @@ from datetime import datetime, timezone as dt_timezone
 
 import requests
 
-from pipelines.config import OPEN_METEO_ARCHIVE_URL, OPEN_METEO_FORECAST_URL, ROOFED_PARKS
+from pipelines.config import OPEN_METEO_ARCHIVE_URL, OPEN_METEO_FORECAST_URL, ROOFED_PARKS, ROOFED_VENUE_IDS
 from pipelines.mlb_stats_client import get_venue_names_by_season, get_venues
 
 log = logging.getLogger(__name__)
@@ -158,6 +158,15 @@ def _nearest_hour_index(hourly_times: list[str], target_utc_iso: str) -> int | N
     return best_idx
 
 
+def is_roofed(venue_name: str | None, venue_id: int | None = None) -> bool:
+    """True for a park with a roof. Checks the venue id first (survives
+    sponsor renames), then falls back to the name list for callers that
+    only have a name."""
+    if venue_id is not None and int(venue_id) in ROOFED_VENUE_IDS:
+        return True
+    return venue_name in ROOFED_PARKS
+
+
 def build_game_condition_row(
     game_id: int,
     venue_name: str,
@@ -166,6 +175,7 @@ def build_game_condition_row(
     is_forecast: bool,
     orientation_deg: float | None,
     coords_cache: dict[str, tuple[float, float]] | None = None,
+    venue_id: int | None = None,
 ) -> dict | None:
     coords = coords_cache if coords_cache is not None else _venue_coords_by_name()
     latlon = coords.get(venue_name)
@@ -222,7 +232,7 @@ def build_game_condition_row(
     # Roofed parks: never let wind/orientation drive wind_effect -- a closed
     # roof makes the physics moot, and we have no per-game roof-state feed to
     # tell open from closed. See config.ROOFED_PARKS and the module docstring.
-    if venue_name in ROOFED_PARKS:
+    if is_roofed(venue_name, venue_id):
         wind_effect = "neutral"
     else:
         wind_effect = _classify_wind_effect(wind_speed, wind_direction, orientation_deg)

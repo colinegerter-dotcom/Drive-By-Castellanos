@@ -61,7 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 
 from pipelines.config import CENTRAL, CURRENT_SEASON, SEASON_START_MD, SEASON_END_MD
-from pipelines.db import get_conn, upsert_rows
+from pipelines.db import get_conn, replace_game_rows, upsert_rows
 from pipelines.reference.teams import build_team_rows
 from pipelines.reference.players import (
     collect_player_ids_for_season,
@@ -70,10 +70,12 @@ from pipelines.reference.players import (
 )
 from pipelines.games.games import build_game_rows
 from pipelines.games.game_results import build_game_result_row, update_game_umpire
-from pipelines.games.lineup import build_lineup_rows
+from pipelines.games.lineup import LINEUP_KEEP_COLS, LINEUP_KEY, build_lineup_rows, lineup_problems
+from pipelines.games.resumed_games import RESUMED_KEY, resumed_game_rows
 from pipelines.games.game_conditions import build_game_condition_row, _venue_coords_by_name
 from pipelines.games.team_form import build_team_form_row
 from pipelines.games.bullpen_status import build_bullpen_status_row
+from pipelines.mlb_stats_client import get_schedule_light
 from pipelines.pitches.pitches import build_pitch_rows_for_range
 from pipelines.pitch_store import merge_day, open_pitch_source
 from pipelines.player_form.starting_pitcher_form import build_starting_pitcher_form_row
@@ -248,11 +250,19 @@ def run(today: str | None = None):
                     continue
                 upsert_rows(conn, "game_results", [result_row], conflict_cols=["game_id"])
                 lineup_rows = build_lineup_rows(g["game_id"])
+                # 24 Sep 2026: true starters now (see pipelines/games/lineup.py),
+                # written delete-and-reinsert so a re-pulled game can't keep
+                # stale rows. A malformed lineup is logged, not written.
+                issues = lineup_problems(lineup_rows, [g["home_team"], g["away_team"]])
+                if issues:
+                    log.warning("game %s lineup not written: %s", g["game_id"], "; ".join(issues))
+                    lineup_rows = []
                 # Same gap the backfill hit: a player can appear in a box score
                 # without having been on any roster pull, and his lineup row would
                 # otherwise be silently dropped by the foreign key every night.
                 ensure_players_exist(conn, {r["player_id"] for r in lineup_rows})
-                upsert_rows(conn, "lineup", lineup_rows, conflict_cols=["game_id", "team_id", "player_id"])
+                if lineup_rows:
+                    replace_game_rows(conn, "lineup", g["game_id"], lineup_rows, LINEUP_KEY, keep_cols=LINEUP_KEEP_COLS)
 
                 # Actual starting_batter_form for yesterday's real lineups --
                 # not wired up before 23 Sep 2026 (build_starting_batter_form_row
@@ -276,12 +286,37 @@ def run(today: str | None = None):
                     is_forecast=False,
                     orientation_deg=orientation_by_venue.get(g["venue"]),
                     coords_cache=coords_cache,
+                    venue_id=g.get("venue_id"),
                 )
                 if cond_row:
                     upsert_rows(conn, "game_conditions", [cond_row], conflict_cols=["game_id"])
 
             log.info("upserting today's schedule (%s)", today)
             upsert_rows(conn, "games", today_games, conflict_cols=["game_id"])
+
+            # Resumed games (24 Sep 2026): one light schedule call for the
+            # season so far. A game suspended last night shows up here with
+            # its resume date; feature windows file its pitches under that
+            # date instead of the original one. See pipelines/games/resumed_games.py.
+            # Not critical to the night: a failure here is logged and rolled
+            # back to its own savepoint, never allowed to sink the whole run
+            # (the nightly is one transaction, and a failed run also skips the
+            # pitch upload). The next night retries it.
+            with conn.cursor() as cur:
+                cur.execute("SAVEPOINT resumed_games")
+                try:
+                    cur.execute("select game_id from mlb.games where season = %s", (season,))
+                    known_games = {r[0] for r in cur.fetchall()}
+                    resumed = [
+                        r for r in resumed_game_rows(get_schedule_light(f"{season}-{SEASON_START_MD}", today))
+                        if r["game_id"] in known_games
+                    ]
+                    upsert_rows(conn, "resumed_games", resumed, conflict_cols=RESUMED_KEY, strict=True)
+                    cur.execute("RELEASE SAVEPOINT resumed_games")
+                    log.info("resumed games this season: %d", len(resumed))
+                except Exception as exc:
+                    cur.execute("ROLLBACK TO SAVEPOINT resumed_games")
+                    log.error("resumed-games upkeep failed, skipped for tonight: %s", exc)
 
             log.info("computing today's pregame form tables")
             with conn.cursor() as cur:
@@ -331,6 +366,7 @@ def run(today: str | None = None):
                     is_forecast=True,
                     orientation_deg=orientation_by_venue.get(g["venue"]),
                     coords_cache=coords_cache,
+                    venue_id=g.get("venue_id"),
                 )
                 if cond_row:
                     upsert_rows(conn, "game_conditions", [cond_row], conflict_cols=["game_id"])
