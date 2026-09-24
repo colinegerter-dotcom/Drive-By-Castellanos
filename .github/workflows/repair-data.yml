@@ -1,0 +1,87 @@
+name: Data repair (manual)
+
+# Phase A data fixes, 24 Sep 2026: true starting lineups, bullpen
+# availability, venue ids, resumed games. Runs scripts/repair_data.py once
+# per season, three seasons at a time. Safe to re-run: each step checks its
+# result before committing, and a failed check leaves the season unchanged.
+# Read-only on the pitch files (downloads, never uploads).
+#
+# Don't run it across the nightly pull (6:17 am Central): both write the
+# 2026 lineup and players tables.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Seasons, space-separated"
+        required: true
+        default: "2018 2019 2020 2021 2022 2023 2024 2025 2026"
+      steps:
+        description: "Steps, space-separated (venues resumed lineups batter_form bullpen)"
+        required: true
+        default: "venues resumed lineups batter_form bullpen"
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      seasons: ${{ steps.m.outputs.seasons }}
+    steps:
+      - id: m
+        env:
+          SEASONS: ${{ inputs.seasons }}
+        run: |
+          echo "seasons=$(python3 -c 'import json,os; print(json.dumps([int(x) for x in os.environ["SEASONS"].split()]))')" >> "$GITHUB_OUTPUT"
+
+  repair:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        season: ${{ fromJSON(needs.setup.outputs.seasons) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run offline tests
+        run: |
+          for t in tests/*.py; do echo "== $t"; python "$t" || exit 1; done
+
+      - name: Download this season's pitch data (2021 on)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          S: ${{ matrix.season }}
+        run: |
+          mkdir -p data
+          if [ "$S" -ge 2021 ]; then
+            # Pitch data exists from 2021 on. A failed download must stop the
+            # job, not quietly skip the cross-check.
+            gh release download "pitches-$S" -p "pitches_$S.parquet" -D data --clobber
+            test -s "data/pitches_$S.parquet"
+          else
+            echo "no pitch data before 2021 (expected)"
+          fi
+          ls -la data
+
+      - name: Repair
+        env:
+          SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+          SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+          SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+          SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          S: ${{ matrix.season }}
+          STEPS: ${{ inputs.steps }}
+        run: python scripts/repair_data.py --seasons "$S" --steps $STEPS
