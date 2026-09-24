@@ -1,0 +1,55 @@
+name: Load Covers odds (manual, one-off)
+
+# Loads the 2022-2026 Covers odds (open, 10am CT "p1", close) into
+# mlb.odds_moneyline / odds_runline / odds_totals.
+#
+# The data file sits ENCRYPTED in the release "odds-covers" because this repo
+# is public and the odds come from a commercial site. The key is the
+# ODDS_FILE_KEY secret, so the readable file only ever exists inside this
+# runner. Safe to re-run: the load upserts and then re-counts.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run offline tests
+        run: |
+          for t in tests/*.py; do echo "== $t"; python "$t" || exit 1; done
+
+      - name: Download and decrypt the odds file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ODDS_FILE_KEY: ${{ secrets.ODDS_FILE_KEY }}
+        run: |
+          mkdir -p data
+          gh release download odds-covers -p "covers_odds_load_2022_2026.csv.gz.enc" -D data --clobber
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in data/covers_odds_load_2022_2026.csv.gz.enc \
+            -out data/covers_odds_load_2022_2026.csv.gz \
+            -pass env:ODDS_FILE_KEY
+          # Fail if the file isn't byte-for-byte the one that was built
+          echo "a83fc408869ea544810f32567e6697ff61f86e2f9da3ea177ee488678bbe2029  data/covers_odds_load_2022_2026.csv.gz" | sha256sum -c -
+
+      - name: Load into Supabase
+        env:
+          SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+          SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+          SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+          SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: python scripts/load_covers_odds.py data/covers_odds_load_2022_2026.csv.gz
