@@ -2,13 +2,17 @@ name: Daily MLB data pull
 
 on:
   schedule:
-    # 11:00 UTC = 6:00 AM Central Daylight Time (the MLB season runs almost
-    # entirely within CDT; it's 5:00 AM Central Standard Time on the handful
+    # 11:17 UTC = 6:17 AM Central Daylight Time (the MLB season runs almost
+    # entirely within CDT; it's 5:17 AM Central Standard Time on the handful
     # of season-window days outside DST). Moved from 5:00 AM CDT on 23 Sep
     # 2026 for a wider buffer after a late West Coast game finishes. Runs
     # every day of the year -- scripts/daily_pull.py is what skips the
     # off-season, not this schedule (see its module docstring).
-    - cron: "0 11 * * *"
+    # 24 Sep 2026: minute moved from :00 to :17. GitHub's scheduler is most
+    # overloaded at the top of the hour and delays or drops those runs most
+    # often. Scheduled runs 18-23 Sep started 3.5 to 6 hours late, and the
+    # 24 Sep run still hadn't started by 9 AM Central.
+    - cron: "17 11 * * *"
   workflow_dispatch: {}  # lets Colin trigger a manual run from the Actions tab
 
 permissions:
