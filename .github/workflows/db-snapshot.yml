@@ -1,0 +1,127 @@
+name: Database snapshot (weekly + manual)
+ 
+# Dated, encrypted snapshot of every mlb table (model design A7, 25 Sep 2026):
+#   * Parquet copy of each table + manifest (row counts, checksums), for
+#     training runs to read a fixed copy of the data
+#   * pg_dump backup of the mlb schema, for restoring the database itself
+#   * a dated copy of the current season's pitch file (the nightly job
+#     overwrites pitches-<season> in place)
+# The repo is public and so are its release files, so the data is
+# AES-encrypted with the SNAPSHOT_KEY secret before upload. Nothing is
+# uploaded unless the encrypted file decrypts, every checksum and row count
+# matches, and the backup restores into a scratch Postgres with the same
+# row counts. Each run creates a new release, db-snapshot-YYYYMMDD-HHMM.
+ 
+on:
+  schedule:
+    - cron: "43 13 * * 1"   # Mondays 8:43 am Central (CDT), after the nightly pull
+  workflow_dispatch: {}
+ 
+permissions:
+  contents: write
+ 
+concurrency:
+  group: db-snapshot
+  cancel-in-progress: false
+ 
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      scratch:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: scratch
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+      SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+      SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+      SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SNAPSHOT_KEY: ${{ secrets.SNAPSHOT_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+ 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+ 
+      - name: Check the encryption key is set
+        run: |
+          if [ -z "$SNAPSHOT_KEY" ]; then
+            echo "The SNAPSHOT_KEY secret is missing. Nothing will be uploaded unencrypted."
+            exit 1
+          fi
+ 
+      - name: Install the Postgres 17 client (matches the Supabase server)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -q postgresql-client-17
+ 
+      - name: Export every table to Parquet
+        run: python scripts/db_snapshot.py export --out snap
+ 
+      - name: Full backup of the mlb schema (pg_dump)
+        env:
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          PGSSLMODE: require
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump \
+            -h "$SUPABASE_DB_HOST" -p "${SUPABASE_DB_PORT:-5432}" -U "${SUPABASE_DB_USER:-postgres}" \
+            -d "${SUPABASE_DB_NAME:-postgres}" --schema=mlb -Fc --no-owner --no-privileges \
+            -f snap/mlb.dump
+          ls -la snap
+ 
+      - name: Pack and encrypt
+        run: |
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          tar -C snap -czf "db-snapshot-$STAMP.tar.gz" .
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -in "db-snapshot-$STAMP.tar.gz" -out "db-snapshot-$STAMP.tar.gz.enc" -pass env:SNAPSHOT_KEY
+          sha256sum "db-snapshot-$STAMP.tar.gz.enc" > "db-snapshot-$STAMP.sha256"
+          rm -rf snap "db-snapshot-$STAMP.tar.gz"
+          ls -la
+ 
+      - name: Restore test from the encrypted file
+        run: |
+          sha256sum -c "db-snapshot-$STAMP.sha256"
+          mkdir restore
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in "db-snapshot-$STAMP.tar.gz.enc" -out restore.tar.gz -pass env:SNAPSHOT_KEY
+          tar -C restore -xzf restore.tar.gz
+          python scripts/db_snapshot.py verify --dir restore
+          PGPASSWORD=scratch /usr/lib/postgresql/17/bin/pg_restore \
+            -h localhost -p 5433 -U postgres -d postgres --no-owner --no-privileges restore/mlb.dump
+          python scripts/db_snapshot.py compare --dir restore \
+            --dsn "host=localhost port=5433 user=postgres password=scratch dbname=postgres"
+          rm -rf restore restore.tar.gz
+ 
+      - name: Dated copy of the current season's pitch file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          S=$(python -c "from pipelines.config import CURRENT_SEASON; print(CURRENT_SEASON)")
+          gh release download "pitches-$S" -p "pitches_$S.parquet" -D . --clobber
+          mv "pitches_$S.parquet" "pitches_${S}_$STAMP.parquet"
+ 
+      - name: Upload to a new release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "db-snapshot-$STAMP" --latest=false \
+            -t "Database snapshot $STAMP (encrypted)" \
+            -n "Encrypted snapshot of the mlb schema: Parquet tables + manifest + pg_dump backup, verified by a restore test before upload. Decrypt with the SNAPSHOT_KEY secret; see scripts/db_snapshot.py for how to restore." \
+            "db-snapshot-$STAMP.tar.gz.enc" "db-snapshot-$STAMP.sha256" pitches_*_"$STAMP".parquet
+          echo "uploaded db-snapshot-$STAMP"
+ 
