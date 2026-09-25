@@ -1,0 +1,40 @@
+name: Build player season lines (manual)
+ 
+# Official MLB season lines for every player in mlb.players, plus birth
+# dates (model design A5, 25 Sep 2026). Feeds the prior layer: seasons
+# before 2021 come only from here, since the pitch files start in 2021.
+# Safe to re-run: the table is replaced in one transaction, after checks.
+ 
+on:
+  workflow_dispatch:
+ 
+permissions:
+  contents: read
+ 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+ 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+ 
+      - name: Run offline tests
+        run: |
+          for t in tests/*.py; do echo "== $t"; python "$t" || exit 1; done
+ 
+      - name: Build season lines and birth dates
+        env:
+          SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+          SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+          SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+          SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: python scripts/build_player_seasons.py
+ 
