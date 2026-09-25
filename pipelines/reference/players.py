@@ -112,3 +112,32 @@ def build_player_rows(player_ids: list[int], current_team_by_player: dict[int, i
             }
         )
     return rows
+
+
+def fill_missing_birth_dates(conn, limit: int = 500) -> int:
+    """Birth dates for players who don't have one yet (25 Sep 2026).
+
+    scripts/build_player_seasons.py fills every player once; this keeps new
+    call-ups covered nightly. Only ever fills a NULL: a player's birth date
+    is never overwritten, so an API response missing the field can't blank
+    one (the upsert path would, which is why birth_date isn't in
+    build_player_rows). Returns how many were filled.
+    """
+    import psycopg2.extras
+
+    with conn.cursor() as cur:
+        cur.execute("select player_id from mlb.players where birth_date is null order by player_id limit %s", (limit,))
+        ids = [r[0] for r in cur.fetchall()]
+    if not ids:
+        return 0
+    found = [(p["id"], p["birthDate"]) for p in get_people(ids) if p.get("birthDate")]
+    if not found:
+        return 0
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            "update mlb.players p set birth_date = v.bd::date from (values %s) as v(player_id, bd) "
+            "where p.player_id = v.player_id and p.birth_date is null",
+            found,
+        )
+        return cur.rowcount

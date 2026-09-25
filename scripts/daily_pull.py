@@ -67,11 +67,13 @@ from pipelines.reference.players import (
     collect_player_ids_for_season,
     build_player_rows,
     ensure_players_exist,
+    fill_missing_birth_dates,
 )
 from pipelines.games.games import build_game_rows
 from pipelines.games.game_results import build_game_result_row, update_game_umpire
 from pipelines.games.lineup import LINEUP_KEEP_COLS, LINEUP_KEY, build_lineup_rows, lineup_problems
 from pipelines.games.resumed_games import RESUMED_KEY, resumed_game_rows
+from pipelines.games.inning_scores import INNING_KEY, build_inning_rows, compare_first_five, half_starts
 from pipelines.games.game_conditions import build_game_condition_row, _venue_coords_by_name
 from pipelines.games.team_form import build_team_form_row
 from pipelines.games.bullpen_status import build_bullpen_status_row
@@ -210,6 +212,18 @@ def run(today: str | None = None):
         player_ids = collect_player_ids_for_season(team_ids, season, extra_ids=starter_ids)
         player_rows = build_player_rows(player_ids, current_team_by_player)
         upsert_rows(conn, "players", player_rows, conflict_cols=["player_id"])
+        # Birth dates for new players (25 Sep 2026). Non-critical: logged
+        # and rolled back to its own savepoint on failure.
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT birth_dates")
+            try:
+                filled = fill_missing_birth_dates(conn)
+                cur.execute("RELEASE SAVEPOINT birth_dates")
+                if filled:
+                    log.info("birth dates filled for %d new players", filled)
+            except Exception as exc:
+                cur.execute("ROLLBACK TO SAVEPOINT birth_dates")
+                log.error("birth date fill failed, skipped for tonight: %s", exc)
 
         # Needed by both the batter-form step below (yesterday's actual
         # lineups) and the pitcher-form step further down (today's probable
@@ -243,12 +257,22 @@ def run(today: str | None = None):
             upsert_rows(conn, "games", yesterday_games, conflict_cols=["game_id"])
             coords_cache = _venue_coords_by_name()
             orientation_by_venue = _load_orientation_by_name()
+            finals_for_innings: dict[int, dict] = {}
             for g in yesterday_games:
                 result_row, umpire_id = build_game_result_row(g["game_id"])
                 update_game_umpire(conn, g["game_id"], umpire_id)
                 if result_row is None:
                     continue
                 upsert_rows(conn, "game_results", [result_row], conflict_cols=["game_id"])
+                if result_row.get("game_status") == "completed":
+                    finals_for_innings[g["game_id"]] = {
+                        "home_team": g["home_team"], "away_team": g["away_team"],
+                        "home_final": result_row.get("home_score_final"),
+                        "away_final": result_row.get("away_score_final"),
+                        "home_f5": result_row.get("home_score_f5"),
+                        "away_f5": result_row.get("away_score_f5"),
+                        "innings_played": result_row.get("innings_played"),
+                    }
                 lineup_rows = build_lineup_rows(g["game_id"])
                 # 24 Sep 2026: true starters now (see pipelines/games/lineup.py),
                 # written delete-and-reinsert so a re-pulled game can't keep
@@ -290,6 +314,31 @@ def run(today: str | None = None):
                 )
                 if cond_row:
                     upsert_rows(conn, "game_conditions", [cond_row], conflict_cols=["game_id"])
+
+            # Runs by half inning for yesterday's completed games (25 Sep 2026,
+            # pipelines/games/inning_scores.py). Not critical to the night: a
+            # failure is logged and rolled back to its own savepoint, and the
+            # repair job's "innings" step can rebuild any season.
+            with conn.cursor() as cur:
+                cur.execute("SAVEPOINT inning_scores")
+                try:
+                    inning_rows, inning_problems = build_inning_rows(
+                        half_starts(pitches, list(finals_for_innings)), finals_for_innings
+                    )
+                    f5_check = compare_first_five(inning_rows, finals_for_innings)
+                    bad_f5 = {m["game_id"] for m in f5_check["misses"]}
+                    inning_rows = [r for r in inning_rows if r["game_id"] not in bad_f5]
+                    inning_problems += [(m["game_id"], f"first five {m}") for m in f5_check["misses"]]
+                    for game_id in finals_for_innings:
+                        game_rows = [r for r in inning_rows if r["game_id"] == game_id]
+                        if game_rows:
+                            replace_game_rows(conn, "inning_scores", game_id, game_rows, INNING_KEY)
+                    cur.execute("RELEASE SAVEPOINT inning_scores")
+                    log.info("inning scores: %d rows for %d games; problems: %s",
+                             len(inning_rows), len(finals_for_innings), inning_problems or "none")
+                except Exception as exc:
+                    cur.execute("ROLLBACK TO SAVEPOINT inning_scores")
+                    log.error("inning scores failed, skipped for tonight: %s", exc)
 
             log.info("upserting today's schedule (%s)", today)
             upsert_rows(conn, "games", today_games, conflict_cols=["game_id"])

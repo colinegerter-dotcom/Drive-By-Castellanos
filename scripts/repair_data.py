@@ -16,6 +16,9 @@ Steps, in the order they run for each season:
   batter_form  starting_batter_form follows the lineup: rows for players who
                didn't start are removed, starters without a row get one
   bullpen      recompute every bullpen_status row with the per-reliever rules
+  innings      (added 25 Sep) runs per half inning from the pitch file into
+               mlb.inning_scores, checked against game_results' first-five
+               score before anything is written
 
 ALL-OR-NOTHING (after an independent review, 24 Sep 2026): each group
 computes everything first, runs its checks, and only then writes, in one
@@ -49,6 +52,7 @@ from pipelines.games import bullpen_status  # noqa: E402
 from pipelines.games.bullpen_status import build_bullpen_status_row  # noqa: E402
 from pipelines.games.lineup import LINEUP_KEEP_COLS, LINEUP_KEY, build_lineup_rows, lineup_problems  # noqa: E402
 from pipelines.games.lineup_check import compare_lineups, pitch_lineups  # noqa: E402
+from pipelines.games.inning_scores import INNING_KEY, build_inning_rows, compare_first_five, half_starts  # noqa: E402
 from pipelines.games.resumed_games import RESUMED_KEY, resumed_game_rows, venue_ids_by_game  # noqa: E402
 from pipelines.mlb_stats_client import (  # noqa: E402
     get_career_totals_before_season,
@@ -63,7 +67,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logging.getLogger("pipelines.db").setLevel(logging.WARNING)  # one "upserted 18 rows" line per game is noise
 log = logging.getLogger("repair_data")
 
-STEPS = ["venues", "resumed", "lineups", "batter_form", "bullpen"]
+STEPS = ["venues", "resumed", "lineups", "batter_form", "bullpen", "innings"]
 FETCH_WORKERS = 4
 WRITE_CHUNK = 1000
 # A box score whose starters aren't exactly slots 1-9 is skipped (its old
@@ -448,6 +452,94 @@ def repair_bullpen(conn, season: int, games: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# innings
+# ---------------------------------------------------------------------------
+MAX_INNING_PROBLEM_SHARE = 0.005
+MIN_F5_AGREEMENT = 0.995
+
+
+def completed_results(conn, season: int) -> dict[int, dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select g.game_id, g.home_team, g.away_team, r.home_score_final, r.away_score_final,
+                   r.home_score_f5, r.away_score_f5, r.innings_played
+            from mlb.games g join mlb.game_results r on r.game_id = g.game_id
+            where g.season = %s and r.game_status = 'completed'
+            """,
+            (season,),
+        )
+        out = {
+            r[0]: {"home_team": r[1], "away_team": r[2], "home_final": r[3], "away_final": r[4],
+                   "home_f5": r[5], "away_f5": r[6], "innings_played": r[7]}
+            for r in cur.fetchall()
+        }
+    conn.commit()
+    return out
+
+
+def repair_innings(conn, season: int, pitches) -> None:
+    """Rebuild a season of mlb.inning_scores. Computes and checks everything
+    first; writes in one transaction, re-checked before commit."""
+    if pitches is None:
+        log.info("[%s] innings: no pitch file (pre-2021 season), nothing to do", season)
+        return
+    games = completed_results(conn, season)
+    rows, problems = build_inning_rows(half_starts(pitches), games)
+    f5 = compare_first_five(rows, games)
+    log.info(
+        "[%s] innings: %d completed games, %d half-inning rows for %d games, %d games with problems; "
+        "first five agrees on %d of %d games (%.3f%%)",
+        season, len(games), len(rows), len({r["game_id"] for r in rows}), len(problems),
+        f5["agree"], f5["compared"], 100 * f5["agreement"],
+    )
+    for game_id, why in problems[:30]:
+        log.warning("[%s] innings: game %s skipped: %s", season, game_id, why)
+    for m in f5["misses"][:30]:
+        log.warning("[%s] innings: first-five mismatch %s", season, m)
+    if len({g for g, _ in problems}) > MAX_INNING_PROBLEM_SHARE * max(len(games), 1):
+        raise RepairFailed(f"[{season}] innings: {len(problems)} of {len(games)} games failed checks; nothing written")
+    if f5["agreement"] < MIN_F5_AGREEMENT:
+        raise RepairFailed(f"[{season}] innings: first-five agreement {f5['agreement']:.4f} below {MIN_F5_AGREEMENT}; nothing written")
+    # A game whose first five doesn't match is known to be wrong: skip it too.
+    bad_f5 = {m["game_id"] for m in f5["misses"]}
+    rows = [r for r in rows if r["game_id"] not in bad_f5]
+    write_ids = sorted({r["game_id"] for r in rows})
+
+    try:
+        with conn.cursor() as cur:
+            # Only the games being rewritten; a game that fails the checks keeps
+            # whatever rows it had rather than losing them.
+            cur.execute("delete from mlb.inning_scores where game_id = any(%s)", (write_ids,))
+            removed = cur.rowcount
+        for start in range(0, len(rows), WRITE_CHUNK * 5):
+            upsert_rows(conn, "inning_scores", rows[start:start + WRITE_CHUNK * 5], conflict_cols=INNING_KEY, strict=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select count(*),
+                       count(*) filter (where t.runs_total <> case when t.is_home then r.home_score_final
+                                                                  else r.away_score_final end)
+                from mlb.team_game_runs t
+                join mlb.games g on g.game_id = t.game_id
+                join mlb.game_results r on r.game_id = t.game_id
+                where g.season = %s
+                """,
+                (season,),
+            )
+            team_games, bad_totals = cur.fetchone()
+        if bad_totals:
+            raise RepairFailed(f"[{season}] innings: {bad_totals} team-games don't add up to the final score")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        log.error("[%s] innings write rolled back; the season is unchanged", season)
+        raise
+    log.info("[%s] innings: removed %d old rows, wrote %d; %d team-games add up to their final score",
+             season, removed, len(rows), team_games)
+
+
+# ---------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seasons", nargs="+", type=int, required=True)
@@ -479,6 +571,8 @@ def main() -> None:
                     write_lineups_and_form(conn, season, lplan, fplan)
                 if "bullpen" in steps:
                     repair_bullpen(conn, season, games)
+                if "innings" in steps:
+                    repair_innings(conn, season, pitches)
             finally:
                 if pitches is not None:
                     pitches.close()

@@ -63,6 +63,13 @@ python scripts/daily_pull.py
 # availability, venue ids, resumed games. Run from GitHub Actions ("Data
 # repair (manual)", .github/workflows/repair-data.yml), one job per season:
 python scripts/repair_data.py --seasons 2025 --steps venues resumed lineups batter_form bullpen
+
+# Runs by half inning (the model's 8-inning target), same workflow, step "innings":
+python scripts/repair_data.py --seasons 2021 2022 2023 2024 2025 2026 --steps innings
+
+# Official season lines for every player + birth dates, for the prior layer
+# ("Build player season lines (manual)", .github/workflows/build-player-seasons.yml):
+python scripts/build_player_seasons.py
 ```
 
 For the GitHub Actions workflow to actually run, add these repo secrets
@@ -85,10 +92,11 @@ pipelines/
 scripts/
   backfill.py          historical backfill, season by season
   daily_pull.py         daily incremental job (see its docstring for step ordering)
-  repair_data.py        one-off, re-runnable repairs (lineups, bullpen, venues, resumed games)
+  repair_data.py        re-runnable per-season rebuilds (lineups, bullpen, venues, resumed games, inning scores)
+  build_player_seasons.py  official season lines and birth dates for every player
   load_covers_odds.py   one-off load of the 2022-2026 Covers odds
-sql/migrations/        0001_init.sql (the 13 in-scope tables) through 0004; all applied to Supabase
-.github/workflows/     daily-pull.yml, backfill.yml, load-odds.yml, repair-data.yml
+sql/migrations/        0001_init.sql (the 13 in-scope tables) through 0005; all applied to Supabase
+.github/workflows/     daily-pull.yml, backfill.yml, load-odds.yml, repair-data.yml, build-player-seasons.yml
 ```
 
 ## Design notes worth knowing before touching this

@@ -231,7 +231,16 @@ def get_career_totals_before_season(player_ids: list[int], group: str, season: i
             for entry in person.get("stats", []):
                 if (entry.get("group") or {}).get("displayName") != group:
                     continue
+                # 25 Sep 2026: a traded player's season comes back as one line
+                # per team PLUS a combined line (no team, `numTeams`). Summing
+                # all of them double-counted every split season. Use only the
+                # combined line for seasons that have one.
+                combined_seasons = {
+                    str(sp.get("season")) for sp in entry.get("splits", []) if not sp.get("team")
+                }
                 for split in entry.get("splits", []):
+                    if split.get("team") and str(split.get("season")) in combined_seasons:
+                        continue
                     # yearByYear splits carry a season; skip this season and
                     # anything later, and skip non-MLB lines so minor league
                     # plate appearances don't inflate a "career MLB PA" figure.
@@ -250,6 +259,22 @@ def get_career_totals_before_season(player_ids: list[int], group: str, season: i
                             totals[key] = totals.get(key, 0) + value
             if totals:
                 out[pid] = totals
+    return out
+
+
+def get_people_year_by_year(player_ids: list[int], chunk: int = 50) -> list[dict]:
+    """Raw /people entries with yearByYear hitting AND pitching lines plus
+    bio fields (birthDate, mlbDebutDate). One request per `chunk` players.
+    Parsing lives in pipelines/reference/player_seasons.py."""
+    hydrate = "stats(group=[hitting,pitching],type=[yearByYear])"
+    ids = sorted({int(p) for p in player_ids if p is not None})
+    out: list[dict] = []
+    for i in range(0, len(ids), chunk):
+        data = _get(
+            f"{MLB_STATS_API_BASE}/people",
+            {"personIds": ",".join(str(p) for p in ids[i:i + chunk]), "hydrate": hydrate},
+        )
+        out.extend(data.get("people", []))
     return out
 
 
