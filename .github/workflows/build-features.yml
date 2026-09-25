@@ -1,0 +1,80 @@
+name: Build features (manual)
+ 
+# Phase B feature builder (model design v3.2, 25 Sep 2026).
+# Exports the tables the builder reads, downloads the pitch files, builds
+# one row per team-game at P1 (10am, projected lineups) and P2 (confirmed
+# lineups), runs the leak tests, and uploads the feature files to a new
+# release features-YYYYMMDD-HHMM. Nothing is written to the database.
+#
+# The feature files contain only public MLB data (no odds), so they are
+# uploaded unencrypted.
+ 
+on:
+  workflow_dispatch: {}
+ 
+permissions:
+  contents: write
+ 
+concurrency:
+  group: build-features
+  cancel-in-progress: false
+ 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+      SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+      SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+      SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+ 
+      - name: Install dependencies
+        run: pip install -r requirements.txt numpy
+ 
+      - name: Formula tests
+        run: python tests/test_features_offline.py
+ 
+      - name: Export database tables
+        run: python scripts/export_feature_inputs.py --out inputs
+ 
+      - name: Download pitch files
+        run: |
+          for S in 2021 2022 2023 2024 2025 2026; do
+            gh release download "pitches-$S" -p "pitches_$S.parquet" -D inputs --clobber
+          done
+          ls -la inputs
+ 
+      - name: Build P1 and P2 features
+        run: |
+          mkdir -p out
+          python -m pipelines.features.build --inputs inputs --out out/features_p1.parquet --point P1
+          python -m pipelines.features.build --inputs inputs --out out/features_p2.parquet --point P2
+ 
+      - name: Leak tests (future perturbation)
+        # Dates cover mid-season, opening day, the original date of resumed
+        # game 746942, and a doubleheader day
+        run: |
+          python -m pipelines.features.leak_test --inputs inputs --date 2022-06-15 --point P1 --seasons 2021,2022
+          python -m pipelines.features.leak_test --inputs inputs --date 2022-06-15 --point P2 --seasons 2021,2022
+          python -m pipelines.features.leak_test --inputs inputs --date 2023-03-30 --point P1 --seasons 2021,2022,2023
+          python -m pipelines.features.leak_test --inputs inputs --date 2024-06-26 --point P2 --seasons 2021,2022,2023,2024
+          python -m pipelines.features.leak_test --inputs inputs --date 2024-08-07 --point P1 --seasons 2021,2022,2023,2024
+ 
+      - name: Upload to a new release
+        run: |
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          gh release create "features-$STAMP" --latest=false \
+            -t "Features $STAMP" \
+            -n "Feature builder output: one row per team-game, P1 and P2. Leak tests passed before upload." \
+            out/features_p1.parquet out/features_p2.parquet out/features_p1.notes.json out/features_p2.notes.json
+          echo "uploaded features-$STAMP"
+ 
