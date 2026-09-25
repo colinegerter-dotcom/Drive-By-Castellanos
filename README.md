@@ -70,6 +70,14 @@ python scripts/repair_data.py --seasons 2021 2022 2023 2024 2025 2026 --steps in
 # Official season lines for every player + birth dates, for the prior layer
 # ("Build player season lines (manual)", .github/workflows/build-player-seasons.yml):
 python scripts/build_player_seasons.py
+
+# Weekly encrypted snapshot of every mlb table + pg_dump backup, verified by a
+# restore test before upload ("Database snapshot (weekly + manual)",
+# .github/workflows/db-snapshot.yml). To restore: download the release's .enc
+# file, decrypt with the SNAPSHOT_KEY secret:
+#   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in db-snapshot-X.tar.gz.enc -out snap.tar.gz -pass pass:<key>
+# then read the Parquet files with DuckDB, or pg_restore mlb.dump.
+python scripts/db_snapshot.py export --out snap
 ```
 
 For the GitHub Actions workflow to actually run, add these repo secrets
@@ -94,9 +102,10 @@ scripts/
   daily_pull.py         daily incremental job (see its docstring for step ordering)
   repair_data.py        re-runnable per-season rebuilds (lineups, bullpen, venues, resumed games, inning scores)
   build_player_seasons.py  official season lines and birth dates for every player
+  db_snapshot.py        dated table snapshots: export, verify, compare after a restore
   load_covers_odds.py   one-off load of the 2022-2026 Covers odds
 sql/migrations/        0001_init.sql (the 13 in-scope tables) through 0005; all applied to Supabase
-.github/workflows/     daily-pull.yml, backfill.yml, load-odds.yml, repair-data.yml, build-player-seasons.yml
+.github/workflows/     daily-pull.yml, backfill.yml, load-odds.yml, repair-data.yml, build-player-seasons.yml, db-snapshot.yml
 ```
 
 ## Design notes worth knowing before touching this
