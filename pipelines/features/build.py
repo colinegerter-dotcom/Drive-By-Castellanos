@@ -133,7 +133,7 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     pitching.bullpen(con, "pen_keys_t", skill)
 
     # ---- environment and team strength ----
-    environment.environment(con, "tg")
+    environment.environment(con, "tg", point)
 
     # ---- lineup ----
     if point == "P2":

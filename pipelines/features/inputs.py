@@ -14,7 +14,8 @@ Expected files in the folder:
   players.csv                bats / throws / birth date
   season_lines.csv           official MLB season lines (phase A5)
   pf.csv                     runs park factors by venue id and year
-  gc.csv                     game-time weather
+  gc.csv                     observed game-time weather (used at P2)
+  fc.csv                     day-before forecast at first pitch (used at P1)
   tr.csv                     runs per team-game (the targets, phase A3)
   rg.csv                     resumed games
 """
@@ -76,6 +77,7 @@ def connect(folder: str | Path, seasons: list[int] | None = None) -> duckdb.Duck
     con.execute(f"create table season_lines as select * from {csv('season_lines.csv')}")
     con.execute(f"create table park_factors as select park_id::int venue_id, year, pf_runs from {csv('pf.csv')}")
     con.execute(f"create table conditions as select * from {csv('gc.csv')}")
+    con.execute(f"create table forecasts as select * from {csv('fc.csv')}")
     con.execute(f"create table team_runs as select * from {csv('tr.csv')}")
 
     # Pitches joined to their game, so every pitch knows its date and which

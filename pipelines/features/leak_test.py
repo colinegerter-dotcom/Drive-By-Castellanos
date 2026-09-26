@@ -22,7 +22,7 @@ lineup):
   - listed starters and venues
   - starting lineups (players shuffled, slots shuffled); at P1 the lineups
     of D itself are scrambled too, because P1 must not see them
-  - weather
+  - weather (observed and forecast)
 (Extended 25 Sep after the independent review found the first version left
 ids, innings, scores, starters, venues, season lines and park factors alone.)
 
@@ -112,6 +112,10 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
     gc = pd.read_csv(src / "gc.csv")
     gc.loc[gc.game_id.isin(after), "temp_f"] = 120
     gc.to_csv(dst / "gc.csv", index=False)
+
+    fc = pd.read_csv(src / "fc.csv")
+    fc.loc[fc.game_id.isin(after), "fc_temp_f"] = 120
+    fc.to_csv(dst / "fc.csv", index=False)
 
     for name in ("players.csv", "rg.csv"):
         shutil.copy(src / name, dst / name)

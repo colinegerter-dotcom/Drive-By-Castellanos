@@ -14,10 +14,12 @@ Environment and team-strength features.
                    every model must beat; the main model doesn't use them
                    (design 5.6: they would double-count the lineup)
 
-Known limit (flagged): temp_f here is the OBSERVED game-time temperature.
-P1 is supposed to use the forecast issued before 10am. Archived forecasts
-(Open-Meteo historical forecast service) are a separate step; until then
-the weather effect in backtests is slightly overstated.
+Temperature by prediction point (26 Sep 2026):
+  P1  the forecast issued the day before, for the hour of first pitch
+      (Open-Meteo previous-runs archive, mlb.game_forecasts). Slightly older
+      than a 10am forecast, so if anything it understates what's knowable
+  P2  the observed game-time temperature (close to what's knowable when
+      lineups post, a few hours out)
 """
 from __future__ import annotations
 
@@ -30,10 +32,11 @@ K_TEAM = 30         # games of a team's prior level mixed into its season so far
 TEAM_PRIOR_REGRESS = 1 / 3  # last season's team level pulled a third to the league
 
 
-def environment(con: duckdb.DuckDBPyConnection, keys: str) -> None:
+def environment(con: duckdb.DuckDBPyConnection, keys: str, point: str = "P2") -> None:
     """Per row of `keys` (game_id, season, cutoff, venue_id, bat_team,
     fld_team): writes table `env`."""
     domes = ",".join(map(str, DOME_VENUE_IDS))
+    wx = "fc.fc_temp_f" if point == "P1" else "gc.temp_f"
     roofs = ",".join(map(str, ROOFED_VENUE_IDS - DOME_VENUE_IDS))
 
     # Park-adjusted runs per team-game, regular season, with the date the
@@ -90,8 +93,8 @@ def environment(con: duckdb.DuckDBPyConnection, keys: str) -> None:
         select q.game_id, q.bat_team,
                coalesce(pf.pf_runs, 1.0) as park_factor,
                (pf.pf_runs is null) as new_park,
-               case when q.venue_id in ({domes}) then 72.0 else coalesce(gc.temp_f, 72.0) end as temp_f,
-               (gc.temp_f is null and q.venue_id not in ({domes})) as temp_missing,
+               case when q.venue_id in ({domes}) then 72.0 else coalesce({wx}, 72.0) end as temp_f,
+               ({wx} is null and q.venue_id not in ({domes})) as temp_missing,
                (q.venue_id in ({roofs})) as roof_park,
                -- league level: last season's mean, blended with this season so far
                (coalesce(lc.r5, 0) + {K_LEAGUE} * lp.r5) / (coalesce(lc.n, 0) + {K_LEAGUE}) as league_env_f5,
@@ -108,6 +111,7 @@ def environment(con: duckdb.DuckDBPyConnection, keys: str) -> None:
         from q
         left join park_factors pf on pf.venue_id = q.venue_id and pf.year = q.season
         left join conditions gc on gc.game_id = q.game_id
+        left join forecasts fc on fc.game_id = q.game_id
         left join lc on lc.game_id = q.game_id and lc.bat_team = q.bat_team
         left join oc on oc.game_id = q.game_id and oc.bat_team = q.bat_team
         left join dc on dc.game_id = q.game_id and dc.bat_team = q.bat_team

@@ -66,6 +66,10 @@ QUERIES = {
                c.precip_flag as precip, c.wind_effect, c.is_forecast
         from mlb.game_conditions c join mlb.games g using (game_id) where g.season >= {FIRST_SEASON}
         order by 1""",
+    "fc.csv": f"""
+        select f.game_id, f.fc_temp_f, f.fc_wind_mph, f.fc_wind_dir, f.fc_precip_prob
+        from mlb.game_forecasts f join mlb.games g using (game_id) where g.season >= {FIRST_SEASON}
+        order by 1""",
     "tr.csv": """
         select game_id, team_id, is_home, runs_f5, runs_8, runs_total,
                last_inning_batted as last_inning, innings_played as innings
