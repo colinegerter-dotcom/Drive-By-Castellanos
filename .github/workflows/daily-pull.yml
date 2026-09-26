@@ -1,19 +1,20 @@
 name: Daily MLB data pull
 
 on:
-  schedule:
-    # 11:17 UTC = 6:17 AM Central Daylight Time (the MLB season runs almost
-    # entirely within CDT; it's 5:17 AM Central Standard Time on the handful
-    # of season-window days outside DST). Moved from 5:00 AM CDT on 23 Sep
-    # 2026 for a wider buffer after a late West Coast game finishes. Runs
-    # every day of the year -- scripts/daily_pull.py is what skips the
-    # off-season, not this schedule (see its module docstring).
-    # 24 Sep 2026: minute moved from :00 to :17. GitHub's scheduler is most
-    # overloaded at the top of the hour and delays or drops those runs most
-    # often. Scheduled runs 18-23 Sep started 3.5 to 6 hours late, and the
-    # 24 Sep run still hadn't started by 9 AM Central.
-    - cron: "17 11 * * *"
-  workflow_dispatch: {}  # lets Colin trigger a manual run from the Actions tab
+  # 25 Sep 2026: no GitHub schedule any more. GitHub's timer started runs 2.5
+  # to 6 hours late on 19-23 Sep, skipped 24 Sep entirely, and switches off
+  # scheduled runs in a public repo after 60 days without commits (the
+  # offseason). Supabase now starts this workflow through the API at 6:17 AM
+  # Central (pg_cron job castellanos-daily-pull), checks at 8:17 and 10:17
+  # that yesterday's games were written, and starts it again if not. See
+  # sql/migrations/0006_workflow_triggers.sql.
+  workflow_dispatch: {}  # used by Supabase, and by Colin from the Actions tab
+
+# One run at a time. A retry or manual run that starts while another is going
+# waits for it instead of both merging and uploading the pitch file at once.
+concurrency:
+  group: daily-pull
+  cancel-in-progress: false
 
 permissions:
   contents: write  # needed to read/write the pitches-<season> release asset
