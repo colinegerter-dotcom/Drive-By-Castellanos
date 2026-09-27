@@ -56,7 +56,7 @@ def prepare(f: pd.DataFrame) -> pd.DataFrame:
     # trained on 2022 kept 2022's level in its player features and
     # under-predicted 2023 (after the rule changes) by about 7% all season.
     # Leak-free: the other games' features that day are pre-game too.
-    for c in [c for c in f.columns if c.startswith(("lineup_woba", "lineup_k_bb", "pen_skill", "pitching_composite"))] + ["sp_skill"]:
+    for c in [c for c in f.columns if c.startswith(("lineup_woba", "lineup_k_bb", "pen_skill", "pitching_composite", "ct_"))] + ["sp_skill"]:
         f[c] = f[c] - f.groupby("date")[c].transform("mean")
     for c in ("sp_opener", "roof_park", "sp_rookie", "velo_missing", "pen_missing", "temp_missing", "new_park"):
         f[c] = f[c].astype(float)

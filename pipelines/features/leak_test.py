@@ -10,7 +10,8 @@ moved, it was reading the future.
 What gets scrambled, for data dated D or later:
   - every pitch outcome: all plate appearances become home runs, fastball
     velocity +5 mph, all balls in play become ground balls, all pitch types
-    four-seamers
+    four-seamers, every batted ball 115 mph at 28 degrees (contact quality,
+    added 26 Sep with round 2 group 1)
   - who pitched and who batted, innings, scores and pitch numbers
   - runs per team-game (targets and team strength inputs) x3
   - game results
@@ -67,6 +68,8 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
                 case when game_id in (select game_id from late_df) then release_speed + 5 else release_speed end as release_speed,
                 case when game_id in (select game_id from late_df) and bb_type is not null then 'ground_ball' else bb_type end as bb_type,
                 case when game_id in (select game_id from late_df) then 'FF' else pitch_type end as pitch_type,
+                case when game_id in (select game_id from late_df) then 115.0 else exit_velocity end as exit_velocity,
+                case when game_id in (select game_id from late_df) then 28 else launch_angle end as launch_angle,
                 case when game_id in (select game_id from late_df) then pitcher_id % 997 + 1 else pitcher_id end as pitcher_id,
                 case when game_id in (select game_id from late_df) then batter_id % 991 + 1 else batter_id end as batter_id,
                 case when game_id in (select game_id from late_df) then 0 else bat_score end as bat_score,

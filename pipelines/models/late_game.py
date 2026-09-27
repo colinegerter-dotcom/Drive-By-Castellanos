@@ -44,8 +44,11 @@ _H, _A = np.meshgrid(np.arange(GRID), np.arange(GRID), indexing="ij")
 _TOP_MASK = {st: (np.vectorize(top_state)(_H - _A) == st) for st in TOP_STATES}
 
 
-def _odds_scale(p, r, g):
-    o = p / (1 - p) * np.power(r, g)
+def _odds_scale(p, r, g, lr=1.0):
+    """Odds of scoring x (team strength)^g x (league level change), design E8b:
+    r = the team's expected runs relative to the league's forecast level,
+    lr = the forecast league level relative to the training seasons' level."""
+    o = p / (1 - p) * np.power(r, g) * lr
     return o / (1 + o)
 
 
@@ -88,13 +91,14 @@ class LateGame:
         # top of 9th: scoring chance by state, and g from the team scaling
         top9 = top9.assign(state=[top_state(int(h - a)) for h, a in zip(top9.h8, top9.a8)],
                            r=[rel.get(g, (1.0, 1.0))[1] for g in top9.game_id],
+                           lr=[(tuple(rel.get(g, (1.0, 1.0))) + (1.0,))[2] for g in top9.game_id],
                            y=(top9.runs > 0).astype(float))
         for s in TOP_STATES:
             x = top9[top9.state == s]
             self.top_p[s] = float((x.y.sum() + 1) / (len(x) + 2))
 
         def nll(g):
-            p = _odds_scale(np.array([self.top_p[s] for s in top9.state]), top9.r.to_numpy(), g)
+            p = _odds_scale(np.array([self.top_p[s] for s in top9.state]), top9.r.to_numpy(), g, top9.lr.to_numpy())
             y = top9.y.to_numpy()
             return -np.sum(y * np.log(p) + (1 - y) * np.log(1 - p))
         self.g = float(minimize_scalar(nll, bounds=(0, 3), method="bounded").x)
@@ -125,9 +129,11 @@ class LateGame:
         return self
 
     # ---- the exact engine ----
-    def final_grid(self, g8, home_r=1.0, away_r=1.0):
+    def final_grid(self, g8, home_r=1.0, away_r=1.0, league_r=1.0):
         """g8: (n+1)x(n+1) grid of P(home = i, away = j) after 8 innings.
-        Returns a GRIDxGRID grid of the final score."""
+        Returns a GRIDxGRID grid of the final score. league_r: the forecast
+        league level over the training level (passes with exponent 1)."""
+        lr = league_r
         n = g8.shape[0]
         out = np.zeros((GRID, GRID))
         cur = np.zeros((GRID, GRID))
@@ -137,7 +143,7 @@ class LateGame:
         nxt = np.zeros_like(cur)
         for s in TOP_STATES:
             mask = _TOP_MASK[s]
-            p = _odds_scale(self.top_p[s], away_r, self.g)
+            p = _odds_scale(self.top_p[s], away_r, self.g, lr)
             dist = self._dist(p, self.shape)
             part = np.where(mask, cur, 0.0)
             for k, pk in enumerate(dist):
@@ -148,17 +154,17 @@ class LateGame:
         out += np.where(lead, cur, 0.0)
         cur = np.where(lead, 0.0, cur)
         # --- bottom of 9th with walk-off
-        cur, out = self._bottom(cur, out, H, A, lambda d: _odds_scale(self.bot_p[min(d, 4)], home_r, self.g), self.shape)
+        cur, out = self._bottom(cur, out, H, A, lambda d: _odds_scale(self.bot_p[min(d, 4)], home_r, self.g, lr), self.shape)
         # --- extras
         for _ in range(30):
             if cur.sum() < 1e-6:
                 break
             nxt = np.zeros_like(cur)
-            dist = self._dist(_odds_scale(self.ext_top_p, away_r, self.g), self.ext_shape)
+            dist = self._dist(_odds_scale(self.ext_top_p, away_r, self.g, lr), self.ext_shape)
             for k, pk in enumerate(dist):
                 nxt[:, k:] += pk * cur[:, :GRID - k]
             cur = nxt
-            cur, out = self._bottom(cur, out, H, A, lambda d: _odds_scale(self.ext_bot_p, home_r, self.g), self.ext_shape)
+            cur, out = self._bottom(cur, out, H, A, lambda d: _odds_scale(self.ext_bot_p, home_r, self.g, lr), self.ext_shape)
         # anything left (vanishingly small): split evenly as a home or away one-run win
         if cur.sum() > 0:
             out[1:, :] += 0.5 * cur[:-1, :]
