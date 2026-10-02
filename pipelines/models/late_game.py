@@ -101,7 +101,7 @@ class LateGame:
             p = _odds_scale(np.array([self.top_p[s] for s in top9.state]), top9.r.to_numpy(), g, top9.lr.to_numpy())
             y = top9.y.to_numpy()
             return -np.sum(y * np.log(p) + (1 - y) * np.log(1 - p))
-        self.g = float(minimize_scalar(nll, bounds=(0, 3), method="bounded").x)
+        self.g = float(minimize_scalar(nll, bounds=(0, 3), method="bounded", options={"xatol": 1e-10}).x)   # tight (design E11)
 
         # bottom of 9th: home trails by d >= 0 after the top. Observed runs are
         # cut off by a walk-off, so the chance of scoring is fitted from

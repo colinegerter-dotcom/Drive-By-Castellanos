@@ -147,7 +147,7 @@ class ShapeCorrection:
             return -ll + self.ridge * (th[0] ** 2 + th[1] ** 2)
 
         res = minimize(obj, np.zeros(2), method="Nelder-Mead",
-                       options={"xatol": 1e-4, "fatol": 1e-4, "maxiter": 400})
+                       options={"xatol": 1e-9, "fatol": 1e-9, "maxiter": 4000})   # tight (design E11)
         self.log_a, self.log_b = float(res.x[0]), float(res.x[1])
         self.n_fit = int(len(P))
         return self

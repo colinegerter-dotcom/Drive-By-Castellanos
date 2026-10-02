@@ -26,7 +26,8 @@ one more parameter d moves the chance of zero on the log-odds scale,
 logit P'(0) = logit P(0) + d, and every other count is rescaled by the same
 factor so the probabilities still add to 1. d is fitted jointly with the rest.
 
-Fitted by maximum likelihood (scipy L-BFGS) with a small ridge penalty on the
+Fitted by maximum likelihood (scipy L-BFGS with the exact gradient, tight
+tolerances and a convergence check, design E11) with a small ridge penalty on the
 feature coefficients (features are standardized first, so one penalty fits
 all). Coefficients are plain numbers, saved as JSON: no pickles (design 10).
 """
@@ -36,7 +37,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import minimize
-from scipy.special import gammaln
+from scipy.special import digamma, gammaln
 
 MAX_RUNS = 25  # score grids run 0..25 (design 4)
 
@@ -74,6 +75,7 @@ class NBModel:
     zdelta: float = 0.0
     n_train: int = 0
     loglik: float = 0.0
+    fit_max_grad: float = 0.0
 
     def _X(self, df):
         cols = []
@@ -101,23 +103,71 @@ class NBModel:
         pen = np.r_[0.0, np.full(k - 1, self.ridge)]
 
         zero = y == 0
+        msd = self.mean_scaled_dispersion
+        za = self.zero_adj
 
-        def nll(theta):
-            b, a0, a1 = theta[:k], theta[k], theta[k + 1]
-            eta = np.clip(off + X @ b, -5, 5)
+        def nll_grad(theta):
+            """Penalized negative log-likelihood and its exact gradient
+            (design E11: the earlier finite-difference gradient let the fit
+            stop at slightly different points for inputs that differ only by
+            rounding)."""
+            b, a0 = theta[:k], theta[k]
+            a1 = theta[k + 1] if msd else 0.0
+            eta_raw = off + X @ b
+            eta = np.clip(eta_raw, -5, 5)
+            m_eta = (eta_raw > -5) & (eta_raw < 5)
             mu = np.exp(eta)
-            la = a0 + (a1 * eta if self.mean_scaled_dispersion else 0.0)
-            alpha = np.exp(np.clip(la, -8, 4))
-            lp = nb_logpmf(y, mu, alpha)
-            if self.zero_adj:
-                lp = _zero_adjust_logpmf(lp, zero, nb_logpmf(0.0, mu, alpha), theta[k + 2])
-            return -lp.sum() + 0.5 * np.sum(pen * b * b)
+            la_raw = a0 + a1 * eta
+            la = np.clip(la_raw, -8, 4)
+            m_la = (la_raw > -8) & (la_raw < 4)
+            r = np.exp(-la)
+            rm = r + mu
+            log_r_rm = np.log(r / rm)
+            lp = gammaln(y + r) - gammaln(r) - gammaln(y + 1) + r * log_r_rm + y * np.log(mu / rm)
+            d_mu = y / mu - (r + y) / rm                                  # d lp / d mu
+            d_r = digamma(y + r) - digamma(r) + log_r_rm + (mu - y) / rm  # d lp / d r
+            if za:
+                d = theta[k + 2]
+                lp0 = r * log_r_rm
+                p0 = np.exp(lp0)
+                l1m = np.log(-np.expm1(lp0))
+                lo = lp0 - l1m + d
+                p0n = 1.0 / (1.0 + np.exp(-lo))
+                lp_out = np.where(zero, -np.logaddexp(0.0, -lo), lp - np.logaddexp(0.0, lo) - l1m)
+                c = np.where(zero, (1 - p0n) / (1 - p0), (p0 - p0n) / (1 - p0))   # d lp' / d lp0
+                d0_mu = -r / rm
+                d0_r = log_r_rm + mu / rm
+                g_mu = np.where(zero, 0.0, d_mu) + c * d0_mu
+                g_r = np.where(zero, 0.0, d_r) + c * d0_r
+                g_d = np.where(zero, 1 - p0n, -p0n).sum()
+            else:
+                lp_out, g_mu, g_r = lp, d_mu, d_r
+            g_la = g_r * (-r) * m_la                     # r = exp(-la)
+            g_eta = (g_mu * mu + g_la * a1) * m_eta      # through mu and through la = a0 + a1 * eta
+            grad = np.empty_like(theta)
+            grad[:k] = -(X.T @ g_eta) + pen * b
+            grad[k] = -g_la.sum()
+            if msd:
+                grad[k + 1] = -(g_la * eta).sum()
+            else:
+                grad[k + 1] = 0.0
+            if za:
+                grad[k + 2] = -g_d
+            return -lp_out.sum() + 0.5 * np.sum(pen * b * b), grad
 
         b0 = np.r_[np.log(y.mean()) - off.mean(), np.zeros(k - 1)]
-        theta0 = np.r_[b0, np.log(0.3), 0.0] if not self.zero_adj else np.r_[b0, np.log(0.3), 0.0, 0.0]
-        res = minimize(nll, theta0, method="L-BFGS-B")
-        if not res.success and "ABNORMAL" not in str(res.message):
-            raise RuntimeError(f"NB fit failed: {res.message}")
+        theta0 = np.r_[b0, np.log(0.3), 0.0] if not za else np.r_[b0, np.log(0.3), 0.0, 0.0]
+        res = minimize(nll_grad, theta0, jac=True, method="L-BFGS-B",
+                       options={"maxiter": 20000, "maxcor": 30, "ftol": 1e-15, "gtol": 1e-9})
+        gmax = float(np.max(np.abs(nll_grad(res.x)[1])))
+        # Converged = gradient at the floating-point floor for a sum over n rows.
+        # Measured on 2021-2023 training fits (E11): stops by relative change
+        # leave max |gradient| 3e-8 to 2.4e-4 (n 4,600-9,700), and a further
+        # BFGS polish moves no parameter by more than 1.5e-8, so these are at
+        # the optimum. Allowed: 1e-7 per training row
+        if gmax > 1e-7 * max(1.0, len(y)):
+            raise RuntimeError(f"NB fit did not converge: {res.message}, max gradient {gmax:.2e}")
+        self.fit_max_grad = gmax
         b = res.x[:k]
         self.coef = {"const": float(b[0]), **{f: float(c) for f, c in zip(self.features, b[1:])}}
         self.a0, self.a1 = float(res.x[k]), float(res.x[k + 1]) if self.mean_scaled_dispersion else 0.0
@@ -170,4 +220,4 @@ class NBModel:
                 "center": self.center, "scale": self.scale, "fill": self.fill,
                 "coef": self.coef, "a0": self.a0, "a1": self.a1,
                 "zero_adj": self.zero_adj, "zdelta": self.zdelta,
-                "n_train": self.n_train, "loglik": self.loglik}
+                "n_train": self.n_train, "loglik": self.loglik, "fit_max_grad": self.fit_max_grad}

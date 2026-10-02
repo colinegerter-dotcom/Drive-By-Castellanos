@@ -102,6 +102,7 @@ PK = ["pk_hr", "pk_hit"]
 GROUPS = {
     "contact": {"of": {"M1": "M1c", "M1z": "M1cz", "M1s": "M1cs"}, "feats": CT},
     "park": {"of": {"M1": "M1p", "M1z": "M1pz", "M1s": "M1ps"}, "feats": {"f5": PK, "8": PK}},
+    "none": {"of": {}, "feats": {"f5": [], "8": []}},    # baseline only (design E11 rerun)
 }
 GROUP = R2_OF = R2_FEATS = R2_BASE = MODELS = None
 
@@ -113,8 +114,8 @@ def set_group(name: str) -> None:
     R2_OF = GROUPS[name]["of"]
     R2_FEATS = GROUPS[name]["feats"]
     R2_BASE = {v: k for k, v in R2_OF.items()}
-    MODELS = {"f5": ["B0", "B1", "M1", "M1z", R2_OF["M1"], R2_OF["M1z"]],
-              "full8": ["B0", "B1", "M1", "M1s", R2_OF["M1"], R2_OF["M1s"]]}
+    MODELS = {"f5": ["B0", "B1", "M1", "M1z"] + [R2_OF[m] for m in ("M1", "M1z") if m in R2_OF],
+              "full8": ["B0", "B1", "M1", "M1s"] + [R2_OF[m] for m in ("M1", "M1s") if m in R2_OF]}
 
 
 set_group("contact")
@@ -544,10 +545,14 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
             chal = CHALLENGER[seg]
             c = report["comparisons"][f"{seg} [{v}]: {chal} minus M1"]
             base = chal if c["per_game"] > c["se"] else "M1"
-            cv = R2_OF[base]
-            cc = compare(scores, seg, cv, base, v)
-            report["comparisons"][f"{seg} [{v}]: {cv} minus {base}"] = cc
-            champ = cv if (cc["per_game"] > cc["se"] and cc["fold_A"] > 0 and cc["fold_B"] > 0) else base
+            cv = R2_OF.get(base)
+            if cv is None:      # baseline-only run: no round 2 candidate
+                cc = {"per_game": float("nan"), "se": float("nan"), "fold_A": float("nan"), "fold_B": float("nan")}
+                champ = base
+            else:
+                cc = compare(scores, seg, cv, base, v)
+                report["comparisons"][f"{seg} [{v}]: {cv} minus {base}"] = cc
+                champ = cv if (cc["per_game"] > cc["se"] and cc["fold_A"] > 0 and cc["fold_B"] > 0) else base
             if champ not in ("M1", chal):
                 report["comparisons"][f"{seg} [{v}]: {champ} minus B1"] = compare(scores, seg, champ, "B1", v)
             g1 = report["comparisons"][f"{seg} [{v}]: {champ} minus B1"]
