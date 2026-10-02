@@ -91,15 +91,39 @@ from .nb import MAX_RUNS, NBModel
 K5 = MAX_RUNS + 1
 KS = np.arange(K5)
 LAY = {"f5": Layout(K5), "full": Layout(GRID), "full8": Layout(K5)}
-MODELS = {"f5": ["B0", "B1", "M1", "M1z", "M1c", "M1cz"], "full8": ["B0", "B1", "M1", "M1s", "M1c", "M1cs"]}
 CHALLENGER = {"f5": "M1z", "full": "M1s"}
-# round 2 group 1, contact quality (design E7): the contact version of each candidate
-CONTACT_OF = {"M1": "M1c", "M1z": "M1cz", "M1s": "M1cs"}
+# Round 2 feature groups, one tested per run (--group). Each maps a candidate
+# champion to its version with the group's features added.
+#   contact  group 1, contact quality (design E7; not adopted 27 Sep 2026)
+#   park     group 2, park effects by batter hand (design E10)
 CT_COMMON = ["ct_lu_xw", "ct_lu_brl", "ct_lu_hh", "ct_sp_xw", "ct_sp_brl"]
 CT = {"f5": CT_COMMON + ["ct_pen_xw_f5"], "8": CT_COMMON + ["ct_pen_xw_8"]}
+PK = ["pk_hr", "pk_hit"]
+GROUPS = {
+    "contact": {"of": {"M1": "M1c", "M1z": "M1cz", "M1s": "M1cs"}, "feats": CT},
+    "park": {"of": {"M1": "M1p", "M1z": "M1pz", "M1s": "M1ps"}, "feats": {"f5": PK, "8": PK}},
+}
+GROUP = R2_OF = R2_FEATS = R2_BASE = MODELS = None
+
+
+def set_group(name: str) -> None:
+    """Choose the round 2 group this run tests (module-level, used throughout)."""
+    global GROUP, R2_OF, R2_FEATS, R2_BASE, MODELS
+    GROUP = name
+    R2_OF = GROUPS[name]["of"]
+    R2_FEATS = GROUPS[name]["feats"]
+    R2_BASE = {v: k for k, v in R2_OF.items()}
+    MODELS = {"f5": ["B0", "B1", "M1", "M1z", R2_OF["M1"], R2_OF["M1z"]],
+              "full8": ["B0", "B1", "M1", "M1s", R2_OF["M1"], R2_OF["M1s"]]}
+
+
+set_group("contact")
 SEASON_OF = {fold: test for fold, (_, test) in FOLDS.items()}
 OTHER = {"A": "B", "B": "A"}
-SHARED = ("log_park", "temp_f", "roof_park", "is_home")   # the base part (plus offset and constant)
+# the base part (plus offset and constant). The park-by-hand features (E10)
+# are park features like log_park, so they sit in the base part and the
+# spread fix doesn't shrink them; models without them are unaffected
+SHARED = ("log_park", "temp_f", "roof_park", "is_home", "pk_hr", "pk_hit")
 TAU_GRID = np.round(np.arange(0.2, 1.2001, 0.05), 2)
 MARKET_CLOSE_ML_LOG_LOSS = {2023: 0.676, 2024: 0.674}   # devigged consensus close (design D3)
 BOOT_N = 2000
@@ -139,15 +163,17 @@ def fit_components(seg, name, tr):
     distributions are added (convolved). Returns the fitted components and
     diagnostics. Fits on the actual-level view of the training rows."""
     tr = train_view(tr)
-    ct = name in ("M1c", "M1cz", "M1cs")
+    r2 = name in R2_BASE                      # a round 2 version of a candidate
+    base = R2_BASE.get(name, name)
+    extra = (lambda sfx: R2_FEATS[sfx]) if r2 else (lambda sfx: [])
     if seg == "f5":
-        feats = model_specs("f5")["M1" if name in ("M1z", "M1c", "M1cz") else name] + (CT["f5"] if ct else [])
-        return [_nb(feats, "log_league_env_f5", tr, "runs_f5", zero_adj=(name in ("M1z", "M1cz")))], {}
-    if name not in ("M1s", "M1cs"):
-        feats = model_specs("full8")["M1" if name == "M1c" else name] + (CT["8"] if ct else [])
+        feats = model_specs("f5")["M1" if base == "M1z" else base] + extra("f5")
+        return [_nb(feats, "log_league_env_f5", tr, "runs_f5", zero_adj=(base == "M1z"))], {}
+    if base != "M1s":
+        feats = model_specs("full8")[base] + extra("8")
         return [_nb(feats, "log_league_env_8", tr, "runs_8")], {}
-    m5 = _nb(model_specs("f5")["M1"] + (CT["f5"] if ct else []), "log_league_env_f5", tr, "runs_f5")
-    m68 = _nb(model_specs("full8")["M1"] + (CT["8"] if ct else []), "log_league_env_68", tr, "runs_68")
+    m5 = _nb(model_specs("f5")["M1"] + extra("f5"), "log_league_env_f5", tr, "runs_f5")
+    m68 = _nb(model_specs("full8")["M1"] + extra("8"), "log_league_env_68", tr, "runs_68")
     mu5, mu68 = m5.predict(tr)[0], m68.predict(tr)[0]
     return [m5, m68], {"train_residual_corr_f5_vs_6to8": float(np.corrcoef(tr.runs_f5 - mu5, tr.runs_68 - mu68)[0, 1])}
 
@@ -518,7 +544,7 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
             chal = CHALLENGER[seg]
             c = report["comparisons"][f"{seg} [{v}]: {chal} minus M1"]
             base = chal if c["per_game"] > c["se"] else "M1"
-            cv = CONTACT_OF[base]
+            cv = R2_OF[base]
             cc = compare(scores, seg, cv, base, v)
             report["comparisons"][f"{seg} [{v}]: {cv} minus {base}"] = cc
             champ = cv if (cc["per_game"] > cc["se"] and cc["fold_A"] > 0 and cc["fold_B"] > 0) else base
@@ -527,8 +553,8 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
             g1 = report["comparisons"][f"{seg} [{v}]: {champ} minus B1"]
             report["decisions"][v][seg] = {
                 "challenger": chal, "challenger_minus_M1": c["per_game"], "one_se": c["se"],
-                "contact_candidate": cv, "contact_minus_base": cc["per_game"], "contact_one_se": cc["se"],
-                "contact_fold_A": cc["fold_A"], "contact_fold_B": cc["fold_B"], "champion": champ,
+                "r2_group": GROUP, "r2_candidate": cv, "r2_minus_base": cc["per_game"], "r2_one_se": cc["se"],
+                "r2_fold_A": cc["fold_A"], "r2_fold_B": cc["fold_B"], "champion": champ,
                 "shape_kept": report["shape"][f"{seg}/{champ}/{v}"]["kept"],
                 "G1": {"passes": g1["passes"], **{k: g1[k] for k in ("per_game", "lo", "hi", "fold_A", "fold_B")}}}
             gi[seg] = np.vstack([grids[(seg, fold, champ, v)] for fold in FOLDS])
@@ -582,7 +608,7 @@ def summarize(r):
         for seg, d in dec.items():
             g = d["G1"]
             lines.append(f"[{v}] {seg}: champion {d['champion']} (challenger {d['challenger']} {d['challenger_minus_M1']:+.4f}, 1 SE {d['one_se']:.4f}; "
-                         f"contact {d['contact_candidate']} {d['contact_minus_base']:+.4f}, 1 SE {d['contact_one_se']:.4f}, A {d['contact_fold_A']:+.4f} B {d['contact_fold_B']:+.4f}); "
+                         f"{d['r2_group']} {d['r2_candidate']} {d['r2_minus_base']:+.4f}, 1 SE {d['r2_one_se']:.4f}, A {d['r2_fold_A']:+.4f} B {d['r2_fold_B']:+.4f}); "
                          f"shape kept {d['shape_kept']}; G1 {'PASS' if g['passes'] else 'FAIL'} "
                          f"{g['per_game']:+.4f} [{g['lo']:+.4f}, {g['hi']:+.4f}] A {g['fold_A']:+.4f} B {g['fold_B']:+.4f}")
     for k, v in r["spread"].items():
@@ -616,7 +642,9 @@ def main():
     ap.add_argument("--games", required=True, help="games.csv from the feature inputs (innings, doubleheaders)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--point", default="P1")
+    ap.add_argument("--group", default="contact", choices=sorted(GROUPS), help="round 2 group tested this run")
     a = ap.parse_args()
+    set_group(a.group)
     r = run({"A": a.features_a or a.features, "B": a.features_b or a.features}, a.late, a.out, a.games, a.point)
     print(summarize(r))
 

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import duckdb
 
-from . import contact, environment, events, inputs, lineup, pitching, priors
+from . import contact, environment, events, inputs, lineup, park_hand, pitching, priors
 
 # Features per segment. The model for a segment uses the matching suffix.
 FEATURE_COLUMNS = {
@@ -148,6 +148,9 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     # ---- round 2 group 1: contact quality (design E7) ----
     contact.contact_features(con, "lineup_actual" if point == "P2" else "lineup_proj", "tg")
 
+    # ---- round 2 group 2: park effects by batter hand (design E10) ----
+    park_hand.park_hand_features(con, "lineup_actual" if point == "P2" else "lineup_proj", "tg")
+
     # ---- assemble ----
     tto = pitching.TTO3_RUNS_PER_PA
     parts = []
@@ -172,6 +175,7 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
                (p.pen_skill_8 is null) as pen_missing,
                {','.join(parts)},
                ct.ct_lu_xw, ct.ct_lu_brl, ct.ct_lu_hh, ct.ct_sp_xw, ct.ct_sp_brl, ct.ct_pen_xw_f5, ct.ct_pen_xw_8,
+               coalesce(pk.pk_hr, 0.0) as pk_hr, coalesce(pk.pk_hit, 0.0) as pk_hit,
                e.park_factor, e.new_park, e.temp_f, e.temp_missing, e.roof_park,
                e.league_env_f5, e.league_env_8,
                e.team_off_f5, e.team_off_8, e.team_def_f5, e.team_def_8,
@@ -182,6 +186,7 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
         left join pen p on p.team_id = q.fld_team and p.season = q.season and p.cutoff = q.cutoff
         left join env e on e.game_id = q.game_id and e.bat_team = q.bat_team
         left join ct_feat ct on ct.game_id = q.game_id and ct.bat_team = q.bat_team
+        left join pk_feat pk on pk.game_id = q.game_id and pk.bat_team = q.bat_team
         left join team_runs t on t.game_id = q.game_id and t.team_id = q.bat_team
         order by q.game_id, q.is_home
     """)
