@@ -95,13 +95,16 @@ CHALLENGER = {"f5": "M1z", "full": "M1s"}
 # Round 2 feature groups, one tested per run (--group). Each maps a candidate
 # champion to its version with the group's features added.
 #   contact  group 1, contact quality (design E7; not adopted 27 Sep 2026)
-#   park     group 2, park effects by batter hand (design E10)
+#   park     group 2, park effects by batter hand (design E10; not adopted 1 Oct 2026)
+#   wind     group 3, wind (design E12; judged at P2)
 CT_COMMON = ["ct_lu_xw", "ct_lu_brl", "ct_lu_hh", "ct_sp_xw", "ct_sp_brl"]
 CT = {"f5": CT_COMMON + ["ct_pen_xw_f5"], "8": CT_COMMON + ["ct_pen_xw_8"]}
 PK = ["pk_hr", "pk_hit"]
+WIND = ["wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig"]
 GROUPS = {
     "contact": {"of": {"M1": "M1c", "M1z": "M1cz", "M1s": "M1cs"}, "feats": CT},
     "park": {"of": {"M1": "M1p", "M1z": "M1pz", "M1s": "M1ps"}, "feats": {"f5": PK, "8": PK}},
+    "wind": {"of": {"M1": "M1w", "M1z": "M1wz", "M1s": "M1ws"}, "feats": {"f5": WIND, "8": WIND}},
     "none": {"of": {}, "feats": {"f5": [], "8": []}},    # baseline only (design E11 rerun)
 }
 GROUP = R2_OF = R2_FEATS = R2_BASE = MODELS = None
@@ -124,7 +127,8 @@ OTHER = {"A": "B", "B": "A"}
 # the base part (plus offset and constant). The park-by-hand features (E10)
 # are park features like log_park, so they sit in the base part and the
 # spread fix doesn't shrink them; models without them are unaffected
-SHARED = ("log_park", "temp_f", "roof_park", "is_home", "pk_hr", "pk_hit")
+SHARED = ("log_park", "temp_f", "roof_park", "is_home", "pk_hr", "pk_hit",
+          "wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig")     # wind too (design E12)
 TAU_GRID = np.round(np.arange(0.2, 1.2001, 0.05), 2)
 MARKET_CLOSE_ML_LOG_LOSS = {2023: 0.676, 2024: 0.674}   # devigged consensus close (design D3)
 BOOT_N = 2000

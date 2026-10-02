@@ -27,6 +27,8 @@ lineup):
 (Extended 25 Sep after the independent review found the first version left
 ids, innings, scores, starters, venues, season lines and park factors alone.)
 
+(Wind speed and direction are scrambled too, from 1 Oct 2026.)
+
 D must be in 2022 or later: 2021 is the warm-up season whose full-season
 data is used to fit two small pieces (see pitching.py), by design.
 """
@@ -114,10 +116,15 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
 
     gc = pd.read_csv(src / "gc.csv")
     gc.loc[gc.game_id.isin(after), "temp_f"] = 120
+    # wind too (added 1 Oct 2026 with round 2 group 3, design E12)
+    gc.loc[gc.game_id.isin(after), "wind_speed"] = 40.0
+    gc.loc[gc.game_id.isin(after), "wind_dir"] = (gc.loc[gc.game_id.isin(after), "wind_dir"] + 180) % 360
     gc.to_csv(dst / "gc.csv", index=False)
 
     fc = pd.read_csv(src / "fc.csv")
     fc.loc[fc.game_id.isin(after), "fc_temp_f"] = 120
+    fc.loc[fc.game_id.isin(after), "fc_wind_mph"] = 40.0
+    fc.loc[fc.game_id.isin(after), "fc_wind_dir"] = (fc.loc[fc.game_id.isin(after), "fc_wind_dir"] + 180) % 360
     fc.to_csv(dst / "fc.csv", index=False)
 
     for name in ("players.csv", "rg.csv"):
