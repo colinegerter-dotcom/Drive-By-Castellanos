@@ -564,6 +564,9 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
                 d[f"p_over_{ln}"] = X[:, lay.s > ln].sum(1)
             if seg == "full":
                 d["p_home_m1.5"] = X[:, (lay.h - lay.a) >= 2].sum(1)
+                # away -1.5 (home +1.5 is its complement): needed to price the
+                # run line when the home team is the underdog (phase D market work)
+                d["p_away_m1.5"] = X[:, (lay.a - lay.h) >= 2].sum(1)
             else:
                 d["p_tie"] = X[:, lay.h == lay.a].sum(1)
             rows.append(pd.DataFrame(d))
