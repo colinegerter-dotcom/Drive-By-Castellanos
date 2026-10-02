@@ -96,24 +96,30 @@ CHALLENGER = {"f5": "M1z", "full": "M1s"}
 # champion to its version with the group's features added.
 #   contact  group 1, contact quality (design E7; not adopted 27 Sep 2026)
 #   park     group 2, park effects by batter hand (design E10; not adopted 1 Oct 2026)
-#   wind     group 3, wind (design E12; judged at P2)
+#   wind     group 3, wind (design E12; judged at P2; not adopted 2 Oct 2026)
+#   windc    group 3 second look, park-centred wind (design E13; P2, 2 SE bar)
 CT_COMMON = ["ct_lu_xw", "ct_lu_brl", "ct_lu_hh", "ct_sp_xw", "ct_sp_brl"]
 CT = {"f5": CT_COMMON + ["ct_pen_xw_f5"], "8": CT_COMMON + ["ct_pen_xw_8"]}
 PK = ["pk_hr", "pk_hit"]
 WIND = ["wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig"]
+WINDC = ["wind_out_c", "wind_in_c", "wind_out_wrig_c", "wind_in_wrig_c"]
 GROUPS = {
     "contact": {"of": {"M1": "M1c", "M1z": "M1cz", "M1s": "M1cs"}, "feats": CT},
     "park": {"of": {"M1": "M1p", "M1z": "M1pz", "M1s": "M1ps"}, "feats": {"f5": PK, "8": PK}},
     "wind": {"of": {"M1": "M1w", "M1z": "M1wz", "M1s": "M1ws"}, "feats": {"f5": WIND, "8": WIND}},
+    # a second look at the same seasons must clear 2 standard errors, not 1 (E13)
+    "windc": {"of": {"M1": "M1wc", "M1z": "M1wcz", "M1s": "M1wcs"}, "feats": {"f5": WINDC, "8": WINDC}, "se_bar": 2.0},
     "none": {"of": {}, "feats": {"f5": [], "8": []}},    # baseline only (design E11 rerun)
 }
 GROUP = R2_OF = R2_FEATS = R2_BASE = MODELS = None
+R2_SE_BAR = 1.0     # standard errors a round 2 group must beat its base model by
 
 
 def set_group(name: str) -> None:
     """Choose the round 2 group this run tests (module-level, used throughout)."""
-    global GROUP, R2_OF, R2_FEATS, R2_BASE, MODELS
+    global GROUP, R2_OF, R2_FEATS, R2_BASE, MODELS, R2_SE_BAR
     GROUP = name
+    R2_SE_BAR = GROUPS[name].get("se_bar", 1.0)
     R2_OF = GROUPS[name]["of"]
     R2_FEATS = GROUPS[name]["feats"]
     R2_BASE = {v: k for k, v in R2_OF.items()}
@@ -128,7 +134,8 @@ OTHER = {"A": "B", "B": "A"}
 # are park features like log_park, so they sit in the base part and the
 # spread fix doesn't shrink them; models without them are unaffected
 SHARED = ("log_park", "temp_f", "roof_park", "is_home", "pk_hr", "pk_hit",
-          "wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig")     # wind too (design E12)
+          "wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig",     # wind too (design E12)
+          "wind_out_c", "wind_in_c", "wind_out_wrig_c", "wind_in_wrig_c")   # and E13
 TAU_GRID = np.round(np.arange(0.2, 1.2001, 0.05), 2)
 MARKET_CLOSE_ML_LOG_LOSS = {2023: 0.676, 2024: 0.674}   # devigged consensus close (design D3)
 BOOT_N = 2000
@@ -556,14 +563,14 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
             else:
                 cc = compare(scores, seg, cv, base, v)
                 report["comparisons"][f"{seg} [{v}]: {cv} minus {base}"] = cc
-                champ = cv if (cc["per_game"] > cc["se"] and cc["fold_A"] > 0 and cc["fold_B"] > 0) else base
+                champ = cv if (cc["per_game"] > R2_SE_BAR * cc["se"] and cc["fold_A"] > 0 and cc["fold_B"] > 0) else base
             if champ not in ("M1", chal):
                 report["comparisons"][f"{seg} [{v}]: {champ} minus B1"] = compare(scores, seg, champ, "B1", v)
             g1 = report["comparisons"][f"{seg} [{v}]: {champ} minus B1"]
             report["decisions"][v][seg] = {
                 "challenger": chal, "challenger_minus_M1": c["per_game"], "one_se": c["se"],
                 "r2_group": GROUP, "r2_candidate": cv, "r2_minus_base": cc["per_game"], "r2_one_se": cc["se"],
-                "r2_fold_A": cc["fold_A"], "r2_fold_B": cc["fold_B"], "champion": champ,
+                "r2_fold_A": cc["fold_A"], "r2_fold_B": cc["fold_B"], "r2_se_bar": R2_SE_BAR, "champion": champ,
                 "shape_kept": report["shape"][f"{seg}/{champ}/{v}"]["kept"],
                 "G1": {"passes": g1["passes"], **{k: g1[k] for k in ("per_game", "lo", "hi", "fold_A", "fold_B")}}}
             gi[seg] = np.vstack([grids[(seg, fold, champ, v)] for fold in FOLDS])

@@ -151,7 +151,7 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     # ---- round 2 group 2: park effects by batter hand (design E10) ----
     park_hand.park_hand_features(con, "lineup_actual" if point == "P2" else "lineup_proj", "tg")
 
-    # ---- round 2 group 3: wind (design E12) ----
+    # ---- round 2 group 3: wind (design E12; park-centred version E13) ----
     wind.wind_features(con, "tg", point)
 
     # ---- assemble ----
@@ -180,6 +180,7 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
                ct.ct_lu_xw, ct.ct_lu_brl, ct.ct_lu_hh, ct.ct_sp_xw, ct.ct_sp_brl, ct.ct_pen_xw_f5, ct.ct_pen_xw_8,
                coalesce(pk.pk_hr, 0.0) as pk_hr, coalesce(pk.pk_hit, 0.0) as pk_hit,
                wd.wind_out, wd.wind_in, wd.wind_out_wrig, wd.wind_in_wrig, wd.wind_missing,
+               wd.wind_out_c, wd.wind_in_c, wd.wind_out_wrig_c, wd.wind_in_wrig_c, wd.wind_c_missing,
                e.park_factor, e.new_park, e.temp_f, e.temp_missing, e.roof_park,
                e.league_env_f5, e.league_env_8,
                e.team_off_f5, e.team_off_8, e.team_def_f5, e.team_def_8,

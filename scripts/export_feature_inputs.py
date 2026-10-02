@@ -27,6 +27,7 @@ from pipelines.config import db_dsn  # noqa: E402
 
 FIRST_SEASON = 2021   # feature rows start here
 FIRST_LINES = 2015    # official season lines used as priors go back to here
+FIRST_WIND = 2018     # park wind averages look back 3 seasons (design E13)
 
 QUERIES = {
     "games.csv": f"""
@@ -75,6 +76,10 @@ QUERIES = {
                last_inning_batted as last_inning, innings_played as innings
         from mlb.team_game_runs order by 1, 2""",
     "rg.csv": "select game_id, original_date, resume_date from mlb.resumed_games order by 1",
+    "wind_hist.csv": f"""
+        select g.game_id, g.season, g.venue_id, g.game_type, c.wind_speed, c.wind_direction as wind_dir
+        from mlb.games g left join mlb.game_conditions c using (game_id)
+        where g.season >= {FIRST_WIND} and g.season < {FIRST_SEASON} order by 1""",
 }
 
 

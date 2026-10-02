@@ -18,6 +18,8 @@ Expected files in the folder:
   fc.csv                     day-before forecast at first pitch (used at P1)
   tr.csv                     runs per team-game (the targets, phase A3)
   rg.csv                     resumed games
+  wind_hist.csv              game-time wind for 2018-2020, for park wind
+                             averages (design E13); optional
 """
 from __future__ import annotations
 
@@ -79,6 +81,11 @@ def connect(folder: str | Path, seasons: list[int] | None = None) -> duckdb.Duck
     con.execute(f"create table conditions as select * from {csv('gc.csv')}")
     con.execute(f"create table forecasts as select * from {csv('fc.csv')}")
     con.execute(f"create table team_runs as select * from {csv('tr.csv')}")
+    # 2018-2020 game-time wind, only for each park's usual wind (design E13).
+    # Optional: without it, 2021 games have no park average and their
+    # centred wind features are 0.
+    if (folder / "wind_hist.csv").exists():
+        con.execute(f"create table wind_hist as select * from {csv('wind_hist.csv')}")
 
     # Pitches joined to their game, so every pitch knows its date and which
     # team was batting and which was fielding.

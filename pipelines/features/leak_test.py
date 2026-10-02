@@ -129,6 +129,9 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
 
     for name in ("players.csv", "rg.csv"):
         shutil.copy(src / name, dst / name)
+    # 2018-2020 wind (design E13): all before any test date, copied unchanged
+    if (src / "wind_hist.csv").exists():
+        shutil.copy(src / "wind_hist.csv", dst / "wind_hist.csv")
 
 
 def run(inputs: Path, d: date, point: str, seasons: list[int]) -> int:
