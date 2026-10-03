@@ -98,13 +98,17 @@ CHALLENGER = {"f5": "M1z", "full": "M1s"}
 #   park     group 2, park effects by batter hand (design E10; not adopted 1 Oct 2026)
 #   wind     group 3, wind (design E12; judged at P2; not adopted 2 Oct 2026)
 #   windc    group 3 second look, park-centred wind (design E13; P2, 2 SE bar; not adopted 2 Oct 2026)
-#   ump      group 4, plate umpire's called zone (design E14; P2, 1 SE bar)
+#   ump      group 4, plate umpire's called zone (design E14; P2, 1 SE bar; adopted at P2 2 Oct 2026)
+#   stuff    group 5, pitch stuff score (design E16; P2, E15 rule), stacked on
+#            the umpire group: base models M1u, M1uz, M1us; candidates M1um,
+#            M1umz, M1ums
 CT_COMMON = ["ct_lu_xw", "ct_lu_brl", "ct_lu_hh", "ct_sp_xw", "ct_sp_brl"]
 CT = {"f5": CT_COMMON + ["ct_pen_xw_f5"], "8": CT_COMMON + ["ct_pen_xw_8"]}
 PK = ["pk_hr", "pk_hit"]
 WIND = ["wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig"]
 WINDC = ["wind_out_c", "wind_in_c", "wind_out_wrig_c", "wind_in_wrig_c"]
 UMP = ["ump_cs"]
+STUFF = {"f5": ["sp_stuff"], "8": ["sp_stuff", "pen_stuff_8"]}
 GROUPS = {
     "contact": {"of": {"M1": "M1c", "M1z": "M1cz", "M1s": "M1cs"}, "feats": CT, "min_share": 0.0},
     "park": {"of": {"M1": "M1p", "M1z": "M1pz", "M1s": "M1ps"}, "feats": {"f5": PK, "8": PK}, "min_share": 0.0},
@@ -113,9 +117,17 @@ GROUPS = {
     "windc": {"of": {"M1": "M1wc", "M1z": "M1wcz", "M1s": "M1wcs"}, "feats": {"f5": WINDC, "8": WINDC}, "se_bar": 2.0,
               "min_share": 0.0},
     "ump": {"of": {"M1": "M1u", "M1z": "M1uz", "M1s": "M1us"}, "feats": {"f5": UMP, "8": UMP}, "min_share": 0.0},
+    # "base": the adopted group whose features every M1-family model carries (E15/E16)
+    "stuff": {"of": {"M1": "M1um", "M1z": "M1umz", "M1s": "M1ums"}, "feats": STUFF, "base": "ump"},
     "none": {"of": {}, "feats": {"f5": [], "8": []}},    # baseline only (design E11 rerun)
 }
 GROUP = R2_OF = R2_FEATS = R2_BASE = MODELS = None
+NOFEATS = {"f5": [], "8": []}
+# name table (design E16): model name -> (structure M1 / M1z / M1s, extra
+# features by segment); BASE_NAME maps each structure to this run's base model
+STRUCT: dict = {}
+BASE_NAME = {"M1": "M1", "M1z": "M1z", "M1s": "M1s"}
+BASE_GROUP = None
 R2_SE_BAR = 1.0     # standard errors a round 2 group must beat its base model by
 # Each test season's own gain must be at least this share of the pooled gain
 # (design E15, Colin 2 Oct 2026, for groups tested after the umpire group).
@@ -127,15 +139,27 @@ R2_MIN_SHARE = R2_MIN_SHARE_DEFAULT
 
 def set_group(name: str) -> None:
     """Choose the round 2 group this run tests (module-level, used throughout)."""
-    global GROUP, R2_OF, R2_FEATS, R2_BASE, MODELS, R2_SE_BAR, R2_MIN_SHARE
+    global GROUP, R2_OF, R2_FEATS, R2_BASE, MODELS, R2_SE_BAR, R2_MIN_SHARE, STRUCT, BASE_NAME, BASE_GROUP, CHALLENGER
+    g = GROUPS[name]
     GROUP = name
-    R2_SE_BAR = GROUPS[name].get("se_bar", 1.0)
-    R2_MIN_SHARE = GROUPS[name].get("min_share", R2_MIN_SHARE_DEFAULT)
-    R2_OF = GROUPS[name]["of"]
-    R2_FEATS = GROUPS[name]["feats"]
+    R2_SE_BAR = g.get("se_bar", 1.0)
+    R2_MIN_SHARE = g.get("min_share", R2_MIN_SHARE_DEFAULT)
+    BASE_GROUP = g.get("base")
+    base_of = GROUPS[BASE_GROUP]["of"] if BASE_GROUP else {}
+    base_feats = GROUPS[BASE_GROUP]["feats"] if BASE_GROUP else NOFEATS
+    BASE_NAME = {s: base_of.get(s, s) for s in ("M1", "M1z", "M1s")}
+    STRUCT = {}
+    for s in ("M1", "M1z", "M1s"):
+        STRUCT[BASE_NAME[s]] = (s, base_feats)
+        if s in g["of"]:
+            STRUCT[g["of"][s]] = (s, {k: list(base_feats[k]) + list(g["feats"][k]) for k in ("f5", "8")})
+    R2_OF = {BASE_NAME[s]: cand for s, cand in g["of"].items()}       # base model -> candidate
+    R2_FEATS = g["feats"]
     R2_BASE = {v: k for k, v in R2_OF.items()}
-    MODELS = {"f5": ["B0", "B1", "M1", "M1z"] + [R2_OF[m] for m in ("M1", "M1z") if m in R2_OF],
-              "full8": ["B0", "B1", "M1", "M1s"] + [R2_OF[m] for m in ("M1", "M1s") if m in R2_OF]}
+    CHALLENGER = {"f5": BASE_NAME["M1z"], "full": BASE_NAME["M1s"]}
+    b1, b1z, b1s = BASE_NAME["M1"], BASE_NAME["M1z"], BASE_NAME["M1s"]
+    MODELS = {"f5": ["B0", "B1", b1, b1z] + [R2_OF[m] for m in (b1, b1z) if m in R2_OF],
+              "full8": ["B0", "B1", b1, b1s] + [R2_OF[m] for m in (b1, b1s) if m in R2_OF]}
 
 
 def adopt_r2(cc: dict) -> bool:
@@ -197,9 +221,9 @@ def fit_components(seg, name, tr):
     distributions are added (convolved). Returns the fitted components and
     diagnostics. Fits on the actual-level view of the training rows."""
     tr = train_view(tr)
-    r2 = name in R2_BASE                      # a round 2 version of a candidate
-    base = R2_BASE.get(name, name)
-    extra = (lambda sfx: R2_FEATS[sfx]) if r2 else (lambda sfx: [])
+    # structure and extra features from the name table (E16); B0 and B1 are their own structure
+    base, add = STRUCT.get(name, (name, NOFEATS))
+    extra = lambda sfx: list(add[sfx])
     if seg == "f5":
         feats = model_specs("f5")["M1" if base == "M1z" else base] + extra("f5")
         return [_nb(feats, "log_league_env_f5", tr, "runs_f5", zero_adj=(base == "M1z"))], {}
@@ -410,12 +434,12 @@ def build(fs, late):
             preds[("full", fold, name)] = {**base, "raw:X": out["raw:XF"], "spread:X": out["spread:XF"],
                                            "h": it["H"].runs_total.to_numpy(int), "a": it["A"].runs_total.to_numpy(int)}
         # F5 vs 8-inning consistency (design 6.2), M1 only
-        if seg == "full8" and name == "M1":
+        if seg == "full8" and name == BASE_NAME["M1"]:
             both = pd.concat([it["H"], it["A"]])
-            p5 = fitted[("f5", fold, "M1")]["comps"][0].pmf_grid(both)
+            p5 = fitted[("f5", fold, BASE_NAME["M1"])]["comps"][0].pmf_grid(both)
             p8 = it["comps"][0].pmf_grid(both)
             e5, e8 = p5 @ KS, p8 @ KS
-            diags[f"consistency/{fold}/M1"] = {
+            diags[f"consistency/{fold}/{BASE_NAME['M1']}"] = {
                 "rows": int(len(p5)), "mean_runs_6_to_8": float((e8 - e5).mean()),
                 "rows_innings_6_8_below_0.5_runs": int(((e8 - e5) < 0.5).sum()),
                 "rows_p0_8_above_p0_f5": int((p8[:, 0] > p5[:, 0] + 1e-12).sum())}
@@ -521,6 +545,15 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
         fs[fold] = cache[path]
     late = pd.read_parquet(late_path)
     late = late[~late.season.isin(HELD_OUT)]
+    if BASE_GROUP:
+        # a stacked group (E16) is judged at P2 on top of an adopted group whose
+        # features must be present and real
+        if point != "P2":
+            raise SystemExit(f"group {GROUP} stacks on {BASE_GROUP} and runs at P2 only")
+        for fold, f in fs.items():
+            for col in sorted({c for k in ("f5", "8") for c in GROUPS[BASE_GROUP]["feats"][k]}):
+                if col not in f.columns or not (f[col].notna().any() and f[col].std() > 0):
+                    raise SystemExit(f"base feature {col} missing or constant in fold {fold}'s file")
 
     preds, models, diags, spread = build(fs, late)
     report = {"point": point, "features": {k: str(v) for k, v in features.items()},
@@ -564,8 +597,9 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
 
     # ---- comparisons
     for seg in ("f5", "full8", "full"):
-        chal = "M1z" if seg == "f5" else "M1s"
-        for a_name, b_name in [("B1", "B0"), ("M1", "B0"), ("M1", "B1"), (chal, "M1"), (chal, "B1")]:
+        chal = BASE_NAME["M1z"] if seg == "f5" else BASE_NAME["M1s"]
+        m1 = BASE_NAME["M1"]
+        for a_name, b_name in [("B1", "B0"), (m1, "B0"), (m1, "B1"), (chal, m1), (chal, "B1")]:
             for which in VERSIONS:
                 report["comparisons"][f"{seg} [{which}]: {a_name} minus {b_name}"] = compare(scores, seg, a_name, b_name, which)
 
@@ -576,8 +610,9 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
         gi, obs = {}, {}
         for seg in ("f5", "full"):
             chal = CHALLENGER[seg]
-            c = report["comparisons"][f"{seg} [{v}]: {chal} minus M1"]
-            base = chal if c["per_game"] > c["se"] else "M1"
+            m1 = BASE_NAME["M1"]
+            c = report["comparisons"][f"{seg} [{v}]: {chal} minus {m1}"]
+            base = chal if c["per_game"] > c["se"] else m1
             cv = R2_OF.get(base)
             if cv is None:      # baseline-only run: no round 2 candidate
                 cc = {"per_game": float("nan"), "se": float("nan"), "fold_A": float("nan"), "fold_B": float("nan")}
@@ -586,7 +621,7 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
                 cc = compare(scores, seg, cv, base, v)
                 report["comparisons"][f"{seg} [{v}]: {cv} minus {base}"] = cc
                 champ = cv if adopt_r2(cc) else base
-            if champ not in ("M1", chal):
+            if champ not in (m1, chal):
                 report["comparisons"][f"{seg} [{v}]: {champ} minus B1"] = compare(scores, seg, champ, "B1", v)
             g1 = report["comparisons"][f"{seg} [{v}]: {champ} minus B1"]
             report["decisions"][v][seg] = {

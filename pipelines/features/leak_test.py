@@ -30,6 +30,8 @@ ids, innings, scores, starters, venues, season lines and park factors alone.)
 (Wind speed and direction are scrambled too, from 1 Oct 2026.)
 (Umpire calls, pitch locations, batter zones and counts of D or later, and
 plate umpires of later games, from 2 Oct 2026, design E14.)
+(Pitch movement, spin, extension and release point of D or later, from
+2 Oct 2026, design E16.)
 
 D must be in 2022 or later: 2021 is the warm-up season whose full-season
 data is used to fit two small pieces (see pitching.py), by design.
@@ -62,10 +64,18 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
     after = set(games.loc[pd.to_datetime(games["date"]).dt.date > d, "game_id"])
     con.register("late_df", pd.DataFrame({"game_id": sorted(late)}))
 
+    # Pitcher ids of later games move to OTHER REAL pitchers (a fixed shift
+    # through the sorted list of ids), so their pitches stay in every
+    # calculation that joins to players and the other scrambles below are
+    # actually scored. (Fixed 3 Oct 2026 after the E16 review found that fake
+    # ids under 1000 made the stuff features drop those pitches.)
+    pid = sorted(set().union(*[set(con.execute(f"select distinct pitcher_id from read_parquet('{f.as_posix()}') where pitcher_id is not null").fetchdf().pitcher_id)
+                               for f in src.glob("pitches_*.parquet")]))
+    con.register("pid_map_df", pd.DataFrame({"pitcher_id": pid, "new_pid": pid[7:] + pid[:7]}))
     for f in src.glob("pitches_*.parquet"):
         con.execute(f"""
             copy (
-              select * replace (
+              select * exclude (new_pid) replace (
                 case when game_id in (select game_id from late_df) and events is not null then 'home_run' else events end as events,
                 case when game_id in (select game_id from late_df) and events is not null then 2.0 else woba_value end as woba_value,
                 case when game_id in (select game_id from late_df) and events is not null then 1 else woba_denom end as woba_denom,
@@ -74,7 +84,7 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
                 case when game_id in (select game_id from late_df) then 'FF' else pitch_type end as pitch_type,
                 case when game_id in (select game_id from late_df) then 115.0 else exit_velocity end as exit_velocity,
                 case when game_id in (select game_id from late_df) then 28 else launch_angle end as launch_angle,
-                case when game_id in (select game_id from late_df) then pitcher_id % 997 + 1 else pitcher_id end as pitcher_id,
+                case when game_id in (select game_id from late_df) then coalesce(new_pid, pitcher_id) else pitcher_id end as pitcher_id,
                 case when game_id in (select game_id from late_df) then batter_id % 991 + 1 else batter_id end as batter_id,
                 case when game_id in (select game_id from late_df) then 0 else bat_score end as bat_score,
                 case when game_id in (select game_id from late_df) then 9 else fld_score end as fld_score,
@@ -91,9 +101,16 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
                 case when game_id in (select game_id from late_df) then plate_z + 0.5 else plate_z end as plate_z,
                 case when game_id in (select game_id from late_df) then sz_top - 0.1 else sz_top end as sz_top,
                 case when game_id in (select game_id from late_df) then 3 else balls end as balls,
-                case when game_id in (select game_id from late_df) then 2 else strikes end as strikes
+                case when game_id in (select game_id from late_df) then 2 else strikes end as strikes,
+                -- pitch traits (design E16): movement, spin, extension, release
+                case when game_id in (select game_id from late_df) then pfx_x + 0.5 else pfx_x end as pfx_x,
+                case when game_id in (select game_id from late_df) then pfx_z + 0.5 else pfx_z end as pfx_z,
+                case when game_id in (select game_id from late_df) then spin_rate + 500 else spin_rate end as spin_rate,
+                case when game_id in (select game_id from late_df) then release_extension + 1 else release_extension end as release_extension,
+                case when game_id in (select game_id from late_df) then release_pos_z + 1 else release_pos_z end as release_pos_z,
+                case when game_id in (select game_id from late_df) then release_pos_x + 1 else release_pos_x end as release_pos_x
               )
-              from read_parquet('{f.as_posix()}')
+              from read_parquet('{f.as_posix()}') left join pid_map_df using (pitcher_id)
             ) to '{(dst / f.name).as_posix()}' (format parquet)
         """)
 
