@@ -28,6 +28,8 @@ lineup):
 ids, innings, scores, starters, venues, season lines and park factors alone.)
 
 (Wind speed and direction are scrambled too, from 1 Oct 2026.)
+(Umpire calls, pitch locations, batter zones and counts of D or later, and
+plate umpires of later games, from 2 Oct 2026, design E14.)
 
 D must be in 2022 or later: 2021 is the warm-up season whose full-season
 data is used to fit two small pieces (see pitching.py), by design.
@@ -77,7 +79,19 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
                 case when game_id in (select game_id from late_df) then 0 else bat_score end as bat_score,
                 case when game_id in (select game_id from late_df) then 9 else fld_score end as fld_score,
                 case when game_id in (select game_id from late_df) then 8 else inning end as inning,
-                case when game_id in (select game_id from late_df) then pitch_number * 3 else pitch_number end as pitch_number
+                case when game_id in (select game_id from late_df) then pitch_number * 3 else pitch_number end as pitch_number,
+                -- umpire calls (design E14): balls become called strikes, swinging
+                -- strikes become balls (so the set of taken pitches changes too),
+                -- locations and the batter's zone move, every count is 3-2
+                case when game_id in (select game_id from late_df) then
+                     case when pitch_result in ('ball', 'blocked_ball') then 'called_strike'
+                          when pitch_result in ('swinging_strike', 'swinging_strike_blocked') then 'ball'
+                          else pitch_result end
+                     else pitch_result end as pitch_result,
+                case when game_id in (select game_id from late_df) then plate_z + 0.5 else plate_z end as plate_z,
+                case when game_id in (select game_id from late_df) then sz_top - 0.1 else sz_top end as sz_top,
+                case when game_id in (select game_id from late_df) then 3 else balls end as balls,
+                case when game_id in (select game_id from late_df) then 2 else strikes end as strikes
               )
               from read_parquet('{f.as_posix()}')
             ) to '{(dst / f.name).as_posix()}' (format parquet)
@@ -95,6 +109,12 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
     m = g2.game_id.isin(after)
     g2.loc[m, "home_sp"] = g2.loc[m, "home_sp"].sample(frac=1, random_state=3).to_numpy()
     g2.loc[m, "venue_id"] = 1
+    # plate umpires (design E14): later games get fake ids; at P1 game D's own
+    # umpire too (P1 doesn't know it; at P2 it is a legitimate input)
+    if "umpire_id" in g2.columns:
+        on_or_after_d = set(games.loc[pd.to_datetime(games["date"]).dt.date >= d, "game_id"])
+        mu = g2.game_id.isin(on_or_after_d if point == "P1" else after)
+        g2.loc[mu, "umpire_id"] = g2.loc[mu, "umpire_id"] % 997 + 900000
     g2.to_csv(dst / "games.csv", index=False)
 
     lu = pd.read_csv(src / "lineup.csv")

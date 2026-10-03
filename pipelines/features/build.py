@@ -22,7 +22,7 @@ from pathlib import Path
 
 import duckdb
 
-from . import contact, environment, events, inputs, lineup, park_hand, pitching, priors, wind
+from . import contact, environment, events, inputs, lineup, park_hand, pitching, priors, umpire, wind
 
 # Features per segment. The model for a segment uses the matching suffix.
 FEATURE_COLUMNS = {
@@ -154,6 +154,9 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     # ---- round 2 group 3: wind (design E12; park-centred version E13) ----
     wind.wind_features(con, "tg", point)
 
+    # ---- round 2 group 4: plate umpire (design E14) ----
+    notes["umpire"] = umpire.umpire_features(con, "tg", point)
+
     # ---- assemble ----
     tto = pitching.TTO3_RUNS_PER_PA
     parts = []
@@ -181,6 +184,7 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
                coalesce(pk.pk_hr, 0.0) as pk_hr, coalesce(pk.pk_hit, 0.0) as pk_hit,
                wd.wind_out, wd.wind_in, wd.wind_out_wrig, wd.wind_in_wrig, wd.wind_missing,
                wd.wind_out_c, wd.wind_in_c, wd.wind_out_wrig_c, wd.wind_in_wrig_c, wd.wind_c_missing,
+               um.ump_cs, um.ump_missing,
                e.park_factor, e.new_park, e.temp_f, e.temp_missing, e.roof_park,
                e.league_env_f5, e.league_env_8,
                e.team_off_f5, e.team_off_8, e.team_def_f5, e.team_def_8,
@@ -193,6 +197,7 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
         left join ct_feat ct on ct.game_id = q.game_id and ct.bat_team = q.bat_team
         left join pk_feat pk on pk.game_id = q.game_id and pk.bat_team = q.bat_team
         left join wind_feat wd on wd.game_id = q.game_id and wd.bat_team = q.bat_team
+        left join ump_feat um on um.game_id = q.game_id and um.bat_team = q.bat_team
         left join team_runs t on t.game_id = q.game_id and t.team_id = q.bat_team
         order by q.game_id, q.is_home
     """)

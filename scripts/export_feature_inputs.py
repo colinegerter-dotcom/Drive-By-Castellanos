@@ -38,7 +38,8 @@ QUERIES = {
                extract(epoch from g.actual_first_pitch)::bigint as fp_actual,
                g.day_night, case when g.doubleheader_flag then 't' else 'f' end as dh,
                g.game_type, g.venue_id, g.venue, r.game_status as status,
-               r.innings_played as innings, r.home_score_final as home_final, r.away_score_final as away_final
+               r.innings_played as innings, r.home_score_final as home_final, r.away_score_final as away_final,
+               g.umpire_id
         from mlb.games g left join mlb.game_results r using (game_id)
         where g.season >= {FIRST_SEASON} order by g.game_id""",
     "lineup.csv": f"""

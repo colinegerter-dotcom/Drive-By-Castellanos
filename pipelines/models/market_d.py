@@ -291,14 +291,19 @@ def test_a(f):
             "p_one_sided": float(1 - norm.cdf(b / se)), "n_games": int(len(f))}
 
 
-def run(odds_dir: Path, pred_p1: Path, pred_p2: Path, out_dir: Path):
+def run(odds_dir: Path, pred_p1: Path, pred_p2: Path, out_dir: Path, model_p1: str = "M1", model_p2: str = "M1u"):
+    """model_p1 / model_p2: the full-game champion at each point (M1 until
+    the umpire group was adopted at P2 on 2 Oct 2026, design E14: M1u)."""
     games, ml, rl = load(odds_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     report = {"devig_2022": devig_comparison(games, ml, rl)}
     preds = {}
-    for point, d in (("P1", pred_p1), ("P2", pred_p2)):
+    report["models"] = {"P1": model_p1, "P2": model_p2}
+    for point, d, mdl in (("P1", pred_p1, model_p1), ("P2", pred_p2, model_p2)):
         p = pd.read_parquet(d / "game_predictions.parquet")
-        p = p[(p.segment == "full") & (p.model == "M1") & (p.version == "final")]
+        p = p[(p.segment == "full") & (p.model == mdl) & (p.version == "final")]
+        if p.empty:
+            raise SystemExit(f"no final full-game predictions for {mdl} in {d}")
         if not set(p.season.unique()) <= {2023, 2024}:
             raise SystemExit("predictions hold seasons outside 2023-2024; refusing")
         preds[point] = p
@@ -339,8 +344,10 @@ def main():
     ap.add_argument("--pred-p1", required=True, type=Path)
     ap.add_argument("--pred-p2", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--model-p1", default="M1", help="full-game champion at P1")
+    ap.add_argument("--model-p2", default="M1u", help="full-game champion at P2 (M1u since design E14; M1 before)")
     a = ap.parse_args()
-    run(a.odds, a.pred_p1, a.pred_p2, a.out)
+    run(a.odds, a.pred_p1, a.pred_p2, a.out, a.model_p1, a.model_p2)
 
 
 if __name__ == "__main__":

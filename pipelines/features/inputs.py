@@ -9,7 +9,8 @@ folder. scripts/export_feature_inputs.py fills that folder from Postgres
 
 Expected files in the folder:
   pitches_<season>.parquet   one per season (the GitHub release files)
-  games.csv                  one row per game, starters are the actual ones
+  games.csv                  one row per game, starters are the actual ones;
+                             umpire_id (plate umpire, design E14) optional
   lineup.csv                 true starting lineups (phase A1)
   players.csv                bats / throws / birth date
   season_lines.csv           official MLB season lines (phase A5)
@@ -59,6 +60,10 @@ def connect(folder: str | Path, seasons: list[int] | None = None) -> duckdb.Duck
         return f"read_csv('{(folder / name).as_posix()}', header=true, auto_detect=true)"
 
     con.execute(f"create table resumed as select game_id, original_date::date original_date, resume_date::date resume_date from {csv('rg.csv')}")
+    # plate umpire of record (design E14); optional, so older input folders
+    # and the offline tests' fake data still load
+    gcols = {r[0] for r in con.execute(f"describe select * from {csv('games.csv')}").fetchall()}
+    ump_col = "g.umpire_id::bigint" if "umpire_id" in gcols else "null::bigint"
     con.execute(f"""
         create table games as
         select g.game_id, g.date::date as date, g.season, g.home_team, g.away_team,
@@ -71,7 +76,8 @@ def connect(folder: str | Path, seasons: list[int] | None = None) -> duckdb.Duck
                -- resumed game finished on its resume date, so ALL of its
                -- pitches are filed under that date (design A4).
                coalesce(r.resume_date, g.date::date) as data_date,
-               (r.game_id is not null) as resumed
+               (r.game_id is not null) as resumed,
+               {ump_col} as umpire_id
         from {csv('games.csv')} g left join resumed r using (game_id)
     """)
     con.execute(f"create table lineup as select * from {csv('lineup.csv')}")
