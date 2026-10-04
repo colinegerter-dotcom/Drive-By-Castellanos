@@ -6,3 +6,4 @@ python-dotenv>=1.0
 tenacity>=8.2
 duckdb>=1.0
 pyarrow>=15.0
+lightgbm>=4.0  # M2 (design E22)

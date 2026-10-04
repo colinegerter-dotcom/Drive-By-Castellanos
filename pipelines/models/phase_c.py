@@ -105,6 +105,10 @@ CHALLENGER = {"f5": "M1z", "full": "M1s"}
 #   trv      group 6, eastward body-clock lag of the fielding team (design E17;
 #            P2, E15 rule), stacked on the umpire group: candidates M1ut,
 #            M1utz, M1uts (not adopted 3 Oct 2026)
+#   m2       M2, gradient-boosted trees for the team part of the mean (design
+#            E22), at P2 on top of the umpire group: candidates M2u (innings
+#            1-8 and full game) and M2uz (F5, zero-adjusted), against M1u, M1uz
+#   m2p1     the same at P1 (no umpire): candidates M2, M2z against M1, M1z
 #   frm      group 7, catcher framing of the fielding team, in runs a game with a
 #            fixed conversion (design E18; P2, E15 rule), stacked on the umpire
 #            group: candidates M1uf, M1ufz, M1ufs
@@ -129,6 +133,10 @@ GROUPS = {
     "stuff": {"of": {"M1": "M1um", "M1z": "M1umz", "M1s": "M1ums"}, "feats": STUFF, "base": "ump"},
     "trv": {"of": {"M1": "M1ut", "M1z": "M1utz", "M1s": "M1uts"}, "feats": {"f5": TRV, "8": TRV}, "base": "ump"},
     "frm": {"of": {"M1": "M1uf", "M1z": "M1ufz", "M1s": "M1ufs"}, "feats": {"f5": FRM, "8": FRM}, "base": "ump"},
+    # M2 (design E22): same columns as the base models; the candidate is a
+    # different model for the team part of the mean, not new features
+    "m2": {"of": {"M1": "M2u", "M1z": "M2uz"}, "feats": {"f5": [], "8": []}, "base": "ump", "gb": True},
+    "m2p1": {"of": {"M1": "M2", "M1z": "M2z"}, "feats": {"f5": [], "8": []}, "gb": True},
     "none": {"of": {}, "feats": {"f5": [], "8": []}},    # baseline only (design E11 rerun)
 }
 GROUP = R2_OF = R2_FEATS = R2_BASE = MODELS = None
@@ -228,6 +236,14 @@ def train_view(tr):
     return tr
 
 
+def _gb(feats, offset, tr, target, **kw):
+    from .gb import GBModel
+    return GBModel(feats, offset, SHARED, **kw).fit(tr, tr[target])
+
+
+GB_NAMES = {"M2", "M2z", "M2u", "M2uz"}
+
+
 def fit_components(seg, name, tr):
     """A model = one or more negative binomial components whose run
     distributions are added (convolved). Returns the fitted components and
@@ -236,12 +252,13 @@ def fit_components(seg, name, tr):
     # structure and extra features from the name table (E16); B0 and B1 are their own structure
     base, add = STRUCT.get(name, (name, NOFEATS))
     extra = lambda sfx: list(add[sfx])
+    fit = _gb if name in GB_NAMES else _nb
     if seg == "f5":
         feats = model_specs("f5")["M1" if base == "M1z" else base] + extra("f5")
-        return [_nb(feats, "log_league_env_f5", tr, "runs_f5", zero_adj=(base == "M1z"))], {}
+        return [fit(feats, "log_league_env_f5", tr, "runs_f5", zero_adj=(base == "M1z"))], {}
     if base != "M1s":
         feats = model_specs("full8")[base] + extra("8")
-        return [_nb(feats, "log_league_env_8", tr, "runs_8")], {}
+        return [fit(feats, "log_league_env_8", tr, "runs_8")], {}
     m5 = _nb(model_specs("f5")["M1"] + extra("f5"), "log_league_env_f5", tr, "runs_f5")
     m68 = _nb(model_specs("full8")["M1"] + extra("8"), "log_league_env_68", tr, "runs_68")
     mu5, mu68 = m5.predict(tr)[0], m68.predict(tr)[0]
