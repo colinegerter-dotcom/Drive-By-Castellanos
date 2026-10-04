@@ -22,7 +22,7 @@ from pathlib import Path
 
 import duckdb
 
-from . import contact, environment, events, inputs, lineup, park_hand, pitching, priors, stuff, umpire, wind
+from . import contact, environment, events, framing, inputs, lineup, park_hand, pitching, priors, stuff, travel, umpire, wind
 
 # Features per segment. The model for a segment uses the matching suffix.
 FEATURE_COLUMNS = {
@@ -160,6 +160,12 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     # ---- round 2 group 5: pitch movement, as a stuff score (design E16) ----
     notes["stuff"] = stuff.stuff_features(con, "tg")
 
+    # ---- round 2 group 6: travel and rest, as eastward body-clock lag (design E17) ----
+    notes["travel"] = travel.travel_features(con, "tg", point)
+
+    # ---- round 2 group 7: catcher framing (design E18); needs ump_taken and ump_grid from group 4 ----
+    notes["framing"] = framing.framing_features(con, "tg", point)
+
     # ---- assemble ----
     tto = pitching.TTO3_RUNS_PER_PA
     parts = []
@@ -189,6 +195,8 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
                wd.wind_out_c, wd.wind_in_c, wd.wind_out_wrig_c, wd.wind_in_wrig_c, wd.wind_c_missing,
                um.ump_cs, um.ump_missing,
                sf.sp_stuff, sf.pen_stuff_8,
+               tv.lag_e_own, tv.lag_e_opp, tv.trv_missing,
+               fr.frm_runs_opp, fr.frm_missing,
                e.park_factor, e.new_park, e.temp_f, e.temp_missing, e.roof_park,
                e.league_env_f5, e.league_env_8,
                e.team_off_f5, e.team_off_8, e.team_def_f5, e.team_def_8,
@@ -203,6 +211,8 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
         left join wind_feat wd on wd.game_id = q.game_id and wd.bat_team = q.bat_team
         left join ump_feat um on um.game_id = q.game_id and um.bat_team = q.bat_team
         left join stuff_feat sf on sf.game_id = q.game_id and sf.bat_team = q.bat_team
+        left join trv_feat tv on tv.game_id = q.game_id and tv.bat_team = q.bat_team
+        left join frm_feat fr on fr.game_id = q.game_id and fr.bat_team = q.bat_team
         left join team_runs t on t.game_id = q.game_id and t.team_id = q.bat_team
         order by q.game_id, q.is_home
     """)

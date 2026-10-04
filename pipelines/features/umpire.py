@@ -82,11 +82,12 @@ def _blur(a: np.ndarray, sigma: float) -> np.ndarray:
 
 def build_taken(con: duckdb.DuckDBPyConnection) -> None:
     """Table ump_taken: every regular-season taken pitch with its cell, side,
-    count group and plate umpire (null if unknown)."""
+    count group, plate umpire (null if unknown) and fielding team (the
+    catcher group, E18, reads it)."""
     con.execute(f"""
         create or replace table ump_taken as
         with t as (
-            select p.game_id, p.season, p.data_date, g.umpire_id,
+            select p.game_id, p.season, p.data_date, g.umpire_id, p.fld_team,
                    -- sd = 1 for a left-handed batter. A switch hitter bats
                    -- opposite the pitcher's arm: right-handed against a lefty
                    case when coalesce(b.bats, 'R') = 'S'
@@ -106,7 +107,7 @@ def build_taken(con: duckdb.DuckDBPyConnection) -> None:
               and p.plate_x is not null and p.plate_z is not null
               and p.sz_top is not null and p.sz_bot is not null and p.sz_top > p.sz_bot
         )
-        select game_id, season, data_date, umpire_id, sd, cg, cs,
+        select game_id, season, data_date, umpire_id, fld_team, sd, cg, cs,
                least(greatest(floor((plate_x - ({X_LO})) * {X_PER_FT})::int, 0), {NX - 1}) as ix,
                least(greatest(floor((h - ({H_LO})) * {H_PER_ZONE})::int, 0), {NH - 1}) as iz
         from t

@@ -32,6 +32,10 @@ ids, innings, scores, starters, venues, season lines and park factors alone.)
 plate umpires of later games, from 2 Oct 2026, design E14.)
 (Pitch movement, spin, extension and release point of D or later, from
 2 Oct 2026, design E16.)
+(Catcher ids of later games move to other real catchers, and a variant with
+lineups left unchanged, from 3 Oct 2026, design E18.)
+(Dates of games after D move 2 days later, from 3 Oct 2026, design E17; their
+venues were already scrambled. The travel measure reads only dates and venues.)
 
 D must be in 2022 or later: 2021 is the warm-up season whose full-season
 data is used to fit two small pieces (see pitching.py), by design.
@@ -49,6 +53,8 @@ import duckdb
 import pandas as pd
 
 from .build import build_features
+
+LINEUP_MODE = "scrambled"   # "unchanged" = variant A of the E18 leak test
 
 
 
@@ -126,6 +132,8 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
     m = g2.game_id.isin(after)
     g2.loc[m, "home_sp"] = g2.loc[m, "home_sp"].sample(frac=1, random_state=3).to_numpy()
     g2.loc[m, "venue_id"] = 1
+    # travel (design E17): later games also move 2 days later
+    g2.loc[m, "date"] = (pd.to_datetime(g2.loc[m, "date"]) + pd.Timedelta(days=2)).dt.strftime("%Y-%m-%d")
     # plate umpires (design E14): later games get fake ids; at P1 game D's own
     # umpire too (P1 doesn't know it; at P2 it is a legitimate input)
     if "umpire_id" in g2.columns:
@@ -139,6 +147,18 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
     m = lu.game_id.isin(on_or_after if point == "P1" else after)
     lu.loc[m, "player_id"] = lu.loc[m, "player_id"].sample(frac=1, random_state=7).to_numpy()
     lu.loc[m, "slot"] = lu.loc[m, "slot"].sample(frac=1, random_state=5).to_numpy()
+    # catchers (design E18): later games' C rows get OTHER REAL catchers (the
+    # plain shuffle above lands mostly on non-catchers with no history, which
+    # is a weak test for a catcher-keyed feature). LINEUP_MODE "unchanged" keeps
+    # every lineup as it was, so only pitch outcomes move (most sensitive for
+    # a pitch-outcome leak)
+    mc = m & (lu["pos"] == "C")
+    real_c = sorted(lu.loc[lu["pos"] == "C", "player_id"].unique())
+    if mc.any():
+        idx = {p_: i for i, p_ in enumerate(real_c)}
+        lu.loc[mc, "player_id"] = [real_c[(idx[p_] + 17) % len(real_c)] for p_ in lu.loc[mc, "player_id"]]
+    if LINEUP_MODE == "unchanged":
+        lu = pd.read_csv(src / "lineup.csv")
     lu.to_csv(dst / "lineup.csv", index=False)
 
     sl = pd.read_csv(src / "season_lines.csv")

@@ -101,7 +101,13 @@ CHALLENGER = {"f5": "M1z", "full": "M1s"}
 #   ump      group 4, plate umpire's called zone (design E14; P2, 1 SE bar; adopted at P2 2 Oct 2026)
 #   stuff    group 5, pitch stuff score (design E16; P2, E15 rule), stacked on
 #            the umpire group: base models M1u, M1uz, M1us; candidates M1um,
-#            M1umz, M1ums
+#            M1umz, M1ums (not adopted 3 Oct 2026)
+#   trv      group 6, eastward body-clock lag of the fielding team (design E17;
+#            P2, E15 rule), stacked on the umpire group: candidates M1ut,
+#            M1utz, M1uts (not adopted 3 Oct 2026)
+#   frm      group 7, catcher framing of the fielding team, in runs a game with a
+#            fixed conversion (design E18; P2, E15 rule), stacked on the umpire
+#            group: candidates M1uf, M1ufz, M1ufs
 CT_COMMON = ["ct_lu_xw", "ct_lu_brl", "ct_lu_hh", "ct_sp_xw", "ct_sp_brl"]
 CT = {"f5": CT_COMMON + ["ct_pen_xw_f5"], "8": CT_COMMON + ["ct_pen_xw_8"]}
 PK = ["pk_hr", "pk_hit"]
@@ -109,6 +115,8 @@ WIND = ["wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig"]
 WINDC = ["wind_out_c", "wind_in_c", "wind_out_wrig_c", "wind_in_wrig_c"]
 UMP = ["ump_cs"]
 STUFF = {"f5": ["sp_stuff"], "8": ["sp_stuff", "pen_stuff_8"]}
+TRV = ["lag_e_opp"]
+FRM = ["frm_runs_opp"]
 GROUPS = {
     "contact": {"of": {"M1": "M1c", "M1z": "M1cz", "M1s": "M1cs"}, "feats": CT, "min_share": 0.0},
     "park": {"of": {"M1": "M1p", "M1z": "M1pz", "M1s": "M1ps"}, "feats": {"f5": PK, "8": PK}, "min_share": 0.0},
@@ -119,6 +127,8 @@ GROUPS = {
     "ump": {"of": {"M1": "M1u", "M1z": "M1uz", "M1s": "M1us"}, "feats": {"f5": UMP, "8": UMP}, "min_share": 0.0},
     # "base": the adopted group whose features every M1-family model carries (E15/E16)
     "stuff": {"of": {"M1": "M1um", "M1z": "M1umz", "M1s": "M1ums"}, "feats": STUFF, "base": "ump"},
+    "trv": {"of": {"M1": "M1ut", "M1z": "M1utz", "M1s": "M1uts"}, "feats": {"f5": TRV, "8": TRV}, "base": "ump"},
+    "frm": {"of": {"M1": "M1uf", "M1z": "M1ufz", "M1s": "M1ufs"}, "feats": {"f5": FRM, "8": FRM}, "base": "ump"},
     "none": {"of": {}, "feats": {"f5": [], "8": []}},    # baseline only (design E11 rerun)
 }
 GROUP = R2_OF = R2_FEATS = R2_BASE = MODELS = None
@@ -181,7 +191,9 @@ OTHER = {"A": "B", "B": "A"}
 SHARED = ("log_park", "temp_f", "roof_park", "is_home", "pk_hr", "pk_hit",
           "wind_out", "wind_in", "wind_out_wrig", "wind_in_wrig",     # wind too (design E12)
           "wind_out_c", "wind_in_c", "wind_out_wrig_c", "wind_in_wrig_c",  # and E13
-          "ump_cs")                                                          # umpire (E14)
+          "ump_cs",                                                          # umpire (E14)
+          "lag_e_opp",                                                       # travel (E17)
+          "frm_runs_opp")                                                    # catcher framing (E18)
 TAU_GRID = np.round(np.arange(0.2, 1.2001, 0.05), 2)
 MARKET_CLOSE_ML_LOG_LOSS = {2023: 0.676, 2024: 0.674}   # devigged consensus close (design D3)
 BOOT_N = 2000
@@ -551,9 +563,11 @@ def run(features: dict, late_path, out_dir, games_csv, point="P1", n_sim=2000):
         if point != "P2":
             raise SystemExit(f"group {GROUP} stacks on {BASE_GROUP} and runs at P2 only")
         for fold, f in fs.items():
-            for col in sorted({c for k in ("f5", "8") for c in GROUPS[BASE_GROUP]["feats"][k]}):
+            need = {c for k in ("f5", "8") for c in GROUPS[BASE_GROUP]["feats"][k]} | \
+                   {c for k in ("f5", "8") for c in R2_FEATS[k]}     # the group's own columns too (E17)
+            for col in sorted(need):
                 if col not in f.columns or not (f[col].notna().any() and f[col].std() > 0):
-                    raise SystemExit(f"base feature {col} missing or constant in fold {fold}'s file")
+                    raise SystemExit(f"feature {col} missing or constant in fold {fold}'s file")
 
     preds, models, diags, spread = build(fs, late)
     report = {"point": point, "features": {k: str(v) for k, v in features.items()},
