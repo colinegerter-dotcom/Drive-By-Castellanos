@@ -91,3 +91,15 @@ def get_people_minor_year_by_year(player_ids: list[int], sport_id: int, chunk: i
         )
         out.extend(data.get("people", []))
     return out
+
+
+def debut_coverage(rows: list[dict], debut: dict, ids: list[int], years=(2021, 2022)) -> tuple[int, int]:
+    """(players in `ids` who debuted in MLB in `years`, how many of them have a
+    minor-league line from a season before their debut season). Players with
+    no debut date (not yet debuted, or missing in mlb.players) are skipped:
+    the first full build crashed on one (KeyError 676601, 4 Oct 2026)."""
+    idset = set(ids)
+    rookies = {p for p, d in debut.items() if d is not None and d.year in years and p in idset}
+    have = {r["player_id"] for r in rows
+            if r["player_id"] in rookies and r["season"] < debut[r["player_id"]].year}
+    return len(rookies), len(have)

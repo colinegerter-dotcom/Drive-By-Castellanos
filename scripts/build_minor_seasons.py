@@ -39,7 +39,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 from pipelines.db import get_conn, upsert_rows  # noqa: E402
 from pipelines.reference.minor_seasons import (  # noqa: E402
-    LEVELS, MINOR_KEY, get_people_minor_year_by_year, minor_season_rows,
+    LEVELS, MINOR_KEY, debut_coverage, get_people_minor_year_by_year, minor_season_rows,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -103,15 +103,13 @@ def main() -> None:
             if not any(r["stat_group"] == g for r in aaa):
                 raise BuildFailed(f"no Triple-A {g} line came back; the sportId filter may not work as assumed; nothing written")
 
-        rookies = [p for p, d in debut.items() if d is not None and d.year in (2021, 2022) and p in set(ids)]
-        have = {r["player_id"] for r in rows if r["season"] < debut[r["player_id"]].year} if debut else set()
-        have = {p for p in have if p in set(rookies)}
-        share = len(have) / len(rookies) if rookies else 1.0
+        n_rookies, n_have = debut_coverage(rows, debut, ids)
+        share = n_have / n_rookies if n_rookies else 1.0
         log.info("players debuting in 2021-2022 in this fetch: %d; with a minor-league line before their debut season: %d (%.1f%%)",
-                 len(rookies), len(have), 100 * share)
-        if rookies and share < 0.5:
+                 n_rookies, n_have, 100 * share)
+        if n_rookies and share < 0.5:
             log.warning("fewer than half of recent debutants have a minor-league line before debut")
-        if rookies and share < 0.1:
+        if n_rookies and share < 0.1:
             raise BuildFailed("almost no recent debutant has a minor-league line before debut; nothing written")
 
         if a.dry_run:

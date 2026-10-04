@@ -15,7 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipelines.reference.minor_seasons import LEVELS, minor_season_lines, minor_season_rows  # noqa: E402
+from datetime import date  # noqa: E402
+
+from pipelines.reference.minor_seasons import LEVELS, debut_coverage, minor_season_lines, minor_season_rows  # noqa: E402
 
 failures = []
 
@@ -84,6 +86,15 @@ check("missing stat is None", rows11[(2019, "hitting")]["sac_flies"], None)
 check("one row per season and group", len(minor_season_rows(PERSON, 11)), 4)
 check("no splits, no rows", minor_season_rows({"id": 2, "stats": []}, 11), [])
 check("lines() empty", minor_season_lines([], 11), {})
+
+print("debut coverage")
+cov_rows = [{"player_id": 1, "season": 2020}, {"player_id": 2, "season": 2022},
+            {"player_id": 3, "season": 2019}, {"player_id": 676601, "season": 2024}]
+cov_debut = {1: date(2021, 5, 1), 2: date(2022, 6, 1), 3: date(2019, 4, 1), 4: date(2022, 4, 1), 5: None}
+# 676601 has a minor line but no debut date (the first full build crashed on this)
+check("player without a debut date is skipped, not a crash", debut_coverage(cov_rows, cov_debut, [1, 2, 3, 4, 5, 676601]), (3, 1))
+check("only players in the fetch count", debut_coverage(cov_rows, cov_debut, [1]), (1, 1))
+check("a line in the debut season itself does not count", debut_coverage([{"player_id": 2, "season": 2022}], cov_debut, [2]), (1, 0))
 
 print("FAILED: " + ", ".join(failures) if failures else "all passed")
 sys.exit(1 if failures else 0)
