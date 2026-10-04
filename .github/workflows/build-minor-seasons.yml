@@ -1,0 +1,50 @@
+name: Build minor-league season lines (manual)
+
+# Triple-A and Double-A season lines for every player in mlb.players
+# (model design group 8, rookie translations, 3 Oct 2026). Run with dry_run
+# set to a number first: it fetches that many recent debutants, prints what
+# came back, and writes nothing. Then run again with it at 0 for the full
+# build. Safe to re-run: the table is replaced in one transaction, after checks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: fetch this many recent debutants and write nothing (0 = full build)"
+        required: true
+        default: "100"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run offline tests
+        run: |
+          for t in tests/*.py; do echo "== $t"; python "$t" || exit 1; done
+
+      - name: Build minor-league season lines
+        env:
+          SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+          SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+          SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+          SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "0" ]; then
+            python scripts/build_minor_seasons.py
+          else
+            python scripts/build_minor_seasons.py --dry-run "${{ github.event.inputs.dry_run }}"
+          fi
