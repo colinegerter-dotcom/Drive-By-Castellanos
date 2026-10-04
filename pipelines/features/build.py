@@ -22,7 +22,7 @@ from pathlib import Path
 
 import duckdb
 
-from . import contact, environment, events, framing, inputs, lineup, park_hand, pitching, priors, stuff, travel, umpire, wind
+from . import contact, environment, events, framing, inputs, lineup, park_hand, pitching, priors, rookie, stuff, travel, umpire, wind
 
 # Features per segment. The model for a segment uses the matching suffix.
 FEATURE_COLUMNS = {
@@ -47,8 +47,11 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     events.build_pa(con)
     events.build_appearances(con)
     priors.build_player_seasons(con)
-    lineup.slot_weights(con)
     notes: dict = {"point": point, "seasons": seasons}
+    # round 2 group 8 (design E19): rookies' starting values from the minors;
+    # must exist before any hitter_rates / pitcher_rates call
+    notes["rookie"] = rookie.build_rookie_adj(con)
+    lineup.slot_weights(con)
 
     # ---- keys: two rows per game ----
     season_list = ",".join(map(str, seasons))

@@ -34,6 +34,8 @@ plate umpires of later games, from 2 Oct 2026, design E14.)
 2 Oct 2026, design E16.)
 (Catcher ids of later games move to other real catchers, and a variant with
 lineups left unchanged, from 3 Oct 2026, design E18.)
+(Minor-league lines and team totals of D's season and later, from 4 Oct 2026,
+design E19; a variant keeps only players who debuted by D.)
 (Dates of games after D move 2 days later, from 3 Oct 2026, design E17; their
 venues were already scrambled. The travel measure reads only dates and venues.)
 
@@ -55,6 +57,7 @@ import pandas as pd
 from .build import build_features
 
 LINEUP_MODE = "scrambled"   # "unchanged" = variant A of the E18 leak test
+MINOR_DEBUT_CUT = False     # True = the E19 variant: minor lines only for players who debuted by D
 
 
 
@@ -184,6 +187,26 @@ def perturb(src: Path, dst: Path, d: date, point: str = "P2") -> None:
     fc.loc[fc.game_id.isin(after), "fc_wind_dir"] = (fc.loc[fc.game_id.isin(after), "fc_wind_dir"] + 180) % 360
     fc.to_csv(dst / "fc.csv", index=False)
 
+    # minor-league lines and team totals (design E19): seasons on or after D's
+    # season scrambled (only seasons before a game's season may be used).
+    # MINOR_DEBUT_CUT drops the lines of every player who hadn't debuted in
+    # MLB by D, so nothing a later call-up did can reach earlier features.
+    if (src / "minor_lines.csv").exists():
+        ml = pd.read_csv(src / "minor_lines.csv")
+        m = ml.season >= d.year
+        for c in ("pa", "ab", "bf", "h", "d2", "d3", "hr", "bb", "ibb", "hbp", "so", "sf", "go", "ao"):
+            ml.loc[m, c] = ml.loc[m, c] * 2 + 3
+        if MINOR_DEBUT_CUT:
+            pl = pd.read_csv(src / "players.csv")
+            deb = pd.to_datetime(pl.set_index("player_id").debut_date, errors="coerce")
+            keep = {p for p, v in deb.items() if pd.notna(v) and v.date() <= d}
+            ml = ml[ml.player_id.isin(keep)]
+        ml.to_csv(dst / "minor_lines.csv", index=False)
+        mt = pd.read_csv(src / "minor_totals.csv")
+        m = mt.season >= d.year
+        for c in ("pa", "ab", "bf", "h", "d2", "d3", "hr", "bb", "ibb", "hbp", "so", "sf", "go", "ao"):
+            mt.loc[m, c] = mt.loc[m, c] * 2 + 3
+        mt.to_csv(dst / "minor_totals.csv", index=False)
     for name in ("players.csv", "rg.csv"):
         shutil.copy(src / name, dst / name)
     # 2018-2020 wind (design E13): all before any test date, copied unchanged

@@ -221,7 +221,8 @@ def hitter_rates(con: duckdb.DuckDBPyConnection, keys: str, out: str) -> None:
                    s1.src_w s1w, s1.pa s1pa, s1.k s1k, s1.bb s1bb, s1.woba_num * {_age_factor('pl.birth_date', 'q.cutoff')} s1wn, s1.woba_den s1wd,
                    s2.src_w s2w, s2.pa s2pa, s2.k s2k, s2.bb s2bb, s2.woba_num * {_age_factor('pl.birth_date', 'q.cutoff')} s2wn, s2.woba_den s2wd,
                    s3.src_w s3w, s3.pa s3pa, s3.k s3k, s3.bb s3bb, s3.woba_num * {_age_factor('pl.birth_date', 'q.cutoff')} s3wn, s3.woba_den s3wd,
-                   l.hit_k, l.hit_bb, l.woba, h.has_history, pl.birth_date
+                   l.hit_k, l.hit_bb, l.woba, h.has_history, pl.birth_date,
+                   coalesce(ra.adj_k, 0) as ra_k, coalesce(ra.adj_bb, 0) as ra_bb, coalesce(ra.adj_woba, 0) as ra_woba
             from q
             join cur c using (player_id, season, cutoff)
             join hist h using (player_id, season, cutoff)
@@ -230,11 +231,12 @@ def hitter_rates(con: duckdb.DuckDBPyConnection, keys: str, out: str) -> None:
             {_prev_join('s3', 'hit_season', 3)}
             left join league_season l on l.season = q.season - 1
             left join players pl on pl.player_id = q.player_id
+            left join rookie_adj ra on ra.player_id = q.player_id and ra.season = q.season and ra.g = 'h'
         )
         select player_id, season, cutoff,
-               {_blend_cols('k', 'pa', K_HIT['k'], 'hit_k', w1, w2, w3)} as k_rate,
-               {_blend_cols('bb', 'pa', K_HIT['bb'], 'hit_bb', w1, w2, w3)} as bb_rate,
-               {_blend_cols('wn', 'wd', K_HIT['woba'], f"woba + case when has_history then 0 else {ROOKIE_WOBA_OFFSET} end", w1, w2, w3, cur_count='woba_num', cur_n='woba_den')} as woba,
+               {_blend_cols('k', 'pa', K_HIT['k'], 'hit_k + case when has_history then 0 else ra_k end', w1, w2, w3)} as k_rate,
+               {_blend_cols('bb', 'pa', K_HIT['bb'], 'hit_bb + case when has_history then 0 else ra_bb end', w1, w2, w3)} as bb_rate,
+               {_blend_cols('wn', 'wd', K_HIT['woba'], f"woba + case when has_history then 0 else {ROOKIE_WOBA_OFFSET} + ra_woba end", w1, w2, w3, cur_count='woba_num', cur_n='woba_den')} as woba,
                coalesce(pa, 0) as pa_current,
                coalesce(s1pa, 0) + coalesce(s2pa, 0) + coalesce(s3pa, 0) as pa_history,
                not has_history as rookie
@@ -287,7 +289,8 @@ def pitcher_rates(con: duckdb.DuckDBPyConnection, keys: str, out: str) -> None:
                    s3.src_w s3w, s3.bf s3bf, s3.k s3k, s3.bb s3bb, s3.bip s3bip, s3.gb s3gb, case when s3.fb_all is null then null else s3.hr end s3hr, s3.fb_all s3fb,
                    l.pit_k, l.pit_bb, l.pit_gb, l.pit_hr_fb,
                    exists (select 1 from pit_season h where h.player_id = q.player_id and h.season < q.season) as has_history,
-                   vc.velo_now, vc.velo_n, vp.velo as velo_prev
+                   vc.velo_now, vc.velo_n, vp.velo as velo_prev,
+                   coalesce(ra.adj_k, 0) as ra_k, coalesce(ra.adj_bb, 0) as ra_bb, coalesce(ra.adj_gb, 0) as ra_gb
             from q
             join cur c using (player_id, season, cutoff)
             join vcur vc using (player_id, season, cutoff)
@@ -296,11 +299,12 @@ def pitcher_rates(con: duckdb.DuckDBPyConnection, keys: str, out: str) -> None:
             {_prev_join('s3', 'pit_season', 3)}
             left join league_season l on l.season = q.season - 1
             left join velo_season vp on vp.player_id = q.player_id and vp.season = q.season - 1
+            left join rookie_adj ra on ra.player_id = q.player_id and ra.season = q.season and ra.g = 'p'
         )
         select player_id, season, cutoff,
-               {_blend_cols('k', 'bf', K_PIT['k'], 'pit_k', w1, w2, w3)} as k_rate,
-               {_blend_cols('bb', 'bf', K_PIT['bb'], 'pit_bb', w1, w2, w3)} as bb_rate,
-               {_blend_cols('gb', 'bip', K_PIT['gb'], 'pit_gb', w1, w2, w3)} as gb_rate,
+               {_blend_cols('k', 'bf', K_PIT['k'], 'pit_k + case when has_history then 0 else ra_k end', w1, w2, w3)} as k_rate,
+               {_blend_cols('bb', 'bf', K_PIT['bb'], 'pit_bb + case when has_history then 0 else ra_bb end', w1, w2, w3)} as bb_rate,
+               {_blend_cols('gb', 'bip', K_PIT['gb'], 'pit_gb + case when has_history then 0 else ra_gb end', w1, w2, w3)} as gb_rate,
                {_blend_cols('hr', 'fb', K_PIT['hr_fb'], 'coalesce(pit_hr_fb, 0.125)', w1, w2, w3, cur_count='hr', cur_n='fb_all')} as hr_fb,
                coalesce(bf, 0) as bf_current,
                coalesce(s1bf, 0) + coalesce(s2bf, 0) + coalesce(s3bf, 0) as bf_history,

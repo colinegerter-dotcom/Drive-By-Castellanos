@@ -92,6 +92,11 @@ def connect(folder: str | Path, seasons: list[int] | None = None) -> duckdb.Duck
     # centred wind features are 0.
     if (folder / "wind_hist.csv").exists():
         con.execute(f"create table wind_hist as select * from {csv('wind_hist.csv')}")
+    # minor-league season lines and team totals (design E19). Optional: without
+    # them rookie priors are today's defaults.
+    if (folder / "minor_lines.csv").exists() and (folder / "minor_totals.csv").exists():
+        con.execute(f"create table minor_lines as select * from {csv('minor_lines.csv')}")
+        con.execute(f"create table minor_totals as select * from {csv('minor_totals.csv')}")
 
     # Pitches joined to their game, so every pitch knows its date and which
     # team was batting and which was fielding.
