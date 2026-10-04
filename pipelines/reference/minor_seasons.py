@@ -22,6 +22,10 @@ from pipelines.reference.player_seasons import FIELD_MAP, HBP_KEY
 
 LEVELS = {"AAA": 11, "AA": 12}
 MINOR_KEY = ["player_id", "season", "stat_group", "sport_id"]
+TEAM_TOTAL_KEY = ["season", "sport_id", "stat_group", "team_id"]
+TEAM_FIELDS = ["games", "plate_appearances", "at_bats", "batters_faced", "hits", "doubles", "triples",
+               "home_runs", "walks", "intentional_walks", "strikeouts", "sac_flies", "sac_bunts",
+               "ground_outs", "air_outs"]
 
 
 def minor_season_lines(splits: list[dict], sport_id: int) -> dict[int, tuple[dict, int]]:
@@ -103,3 +107,41 @@ def debut_coverage(rows: list[dict], debut: dict, ids: list[int], years=(2021, 2
     have = {r["player_id"] for r in rows
             if r["player_id"] in rookies and r["season"] < debut[r["player_id"]].year}
     return len(rookies), len(have)
+
+
+def team_total_rows(resp: dict, season: int, sport_id: int, group: str) -> list[dict]:
+    """Rows for minor_league_team_totals from one /teams/stats response
+    (stats=season, one group, one level). A split whose season or level
+    doesn't match what was asked for is dropped, so a response that ignored
+    the filters yields nothing and the build's team-count check fails."""
+    rows = []
+    for block in resp.get("stats") or []:
+        for sp in block.get("splits") or []:
+            team = sp.get("team") or {}
+            if team.get("id") is None:
+                continue
+            try:
+                if int(sp.get("season")) != season:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            sid = (sp.get("sport") or {}).get("id")
+            if sid is not None and sid != sport_id:
+                continue
+            stat = sp.get("stat") or {}
+            row = {"season": season, "sport_id": sport_id, "stat_group": group,
+                   "team_id": team["id"], "team_name": team.get("name")}
+            for col in TEAM_FIELDS:
+                v = stat.get(FIELD_MAP[col])
+                row[col] = v if isinstance(v, int) else None
+            v = stat.get(HBP_KEY[group])
+            row["hit_by_pitch"] = v if isinstance(v, int) else None
+            row["stat_json"] = stat
+            rows.append(row)
+    return rows
+
+
+def get_team_totals(season: int, sport_id: int, group: str) -> dict:
+    """Raw /teams/stats response: every team's season totals at one level."""
+    return _get(f"{MLB_STATS_API_BASE}/teams/stats",
+                {"season": season, "sportIds": sport_id, "group": group, "stats": "season", "gameType": "R"})

@@ -22,7 +22,12 @@ Checks before anything is committed:
      one minor-league line before their debut season is printed; below 50%
      is a warning, below 10% a failure (international signings and
      two-way players skip levels, so it is not expected to be 100%)
-  4. after writing, the row count in the database matches what was built
+  4. whole-league team totals (mlb.minor_league_team_totals, added 4 Oct 2026
+     after the E19 review): at least 20 teams per level, season and group,
+     else nothing is written; the log prints each level's strikeout rate and
+     ground-out share per season (the review found 2019 ground outs look
+     broken in the player lines; the totals show whether the source has it)
+  5. after writing, the row counts in the database match what was built
 """
 from __future__ import annotations
 
@@ -39,7 +44,8 @@ from dotenv import load_dotenv  # noqa: E402
 
 from pipelines.db import get_conn, upsert_rows  # noqa: E402
 from pipelines.reference.minor_seasons import (  # noqa: E402
-    LEVELS, MINOR_KEY, debut_coverage, get_people_minor_year_by_year, minor_season_rows,
+    LEVELS, MINOR_KEY, TEAM_TOTAL_KEY, debut_coverage, get_people_minor_year_by_year, get_team_totals,
+    minor_season_rows, team_total_rows,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,6 +55,7 @@ log = logging.getLogger("build_minor_seasons")
 CHUNK = 25
 WORKERS = 4
 FIRST_SEASON = 2017       # lines older than this are dropped (priors look back 3 seasons from 2021)
+MIN_TEAMS = 20            # every level had 30 teams in 2017-2019 and 2021 on
 
 
 class BuildFailed(RuntimeError):
@@ -112,13 +119,34 @@ def main() -> None:
         if n_rookies and share < 0.1:
             raise BuildFailed("almost no recent debutant has a minor-league line before debut; nothing written")
 
+        # whole-league team totals per level and season (E19 review: level
+        # averages must not come from the players who later reached MLB)
+        last = max(r["season"] for r in rows)
+        totals: list[dict] = []
+        for season in range(FIRST_SEASON, last + 1):
+            if season == 2020:
+                continue        # no minor-league season
+            for name, sport_id in LEVELS.items():
+                for g in ("hitting", "pitching"):
+                    part = team_total_rows(get_team_totals(season, sport_id, g), season, sport_id, g)
+                    if len(part) < MIN_TEAMS:
+                        raise BuildFailed(f"{name} {g} {season}: {len(part)} teams came back (need {MIN_TEAMS}); nothing written")
+                    go = sum(r["ground_outs"] or 0 for r in part)
+                    ao = sum(r["air_outs"] or 0 for r in part)
+                    pa = sum((r["plate_appearances"] if g == "hitting" else r["batters_faced"]) or 0 for r in part)
+                    so = sum(r["strikeouts"] or 0 for r in part)
+                    log.info("%s %s %s: %d teams, %d chances, K %.3f, ground outs / batted-ball outs %.3f",
+                             name, g, season, len(part), pa, so / pa if pa else float("nan"),
+                             go / (go + ao) if go + ao else float("nan"))
+                    totals.extend(part)
+
         if a.dry_run:
             for r in rows[:5]:
                 log.info("sample: %s", {k: v for k, v in r.items() if k != "stat_json"})
             log.info("dry run: nothing written")
             return
 
-        for r in rows:
+        for r in rows + totals:
             r["stat_json"] = psycopg2.extras.Json(r["stat_json"])
         try:
             with conn.cursor() as cur:
@@ -128,16 +156,25 @@ def main() -> None:
                 upsert_rows(conn, "player_minor_season_stats", rows[start:start + 2000],
                             conflict_cols=MINOR_KEY, strict=True)
             with conn.cursor() as cur:
+                cur.execute("delete from mlb.minor_league_team_totals")
+            for start in range(0, len(totals), 2000):
+                upsert_rows(conn, "minor_league_team_totals", totals[start:start + 2000],
+                            conflict_cols=TEAM_TOTAL_KEY, strict=True)
+            with conn.cursor() as cur:
                 cur.execute("select count(*) from mlb.player_minor_season_stats")
                 n_rows = cur.fetchone()[0]
+                cur.execute("select count(*) from mlb.minor_league_team_totals")
+                n_tot = cur.fetchone()[0]
             if n_rows != len(rows):
                 raise BuildFailed(f"wrote {n_rows} lines, expected {len(rows)}")
+            if n_tot != len(totals):
+                raise BuildFailed(f"wrote {n_tot} team totals, expected {len(totals)}")
             conn.commit()
         except Exception:
             conn.rollback()
             log.error("write rolled back; mlb.player_minor_season_stats is unchanged")
             raise
-        log.info("done: replaced %d lines with %d", removed, n_rows)
+        log.info("done: replaced %d lines with %d; %d team totals", removed, n_rows, n_tot)
 
 
 if __name__ == "__main__":

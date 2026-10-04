@@ -17,7 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datetime import date  # noqa: E402
 
-from pipelines.reference.minor_seasons import LEVELS, debut_coverage, minor_season_lines, minor_season_rows  # noqa: E402
+from pipelines.reference.minor_seasons import (  # noqa: E402
+    LEVELS, debut_coverage, minor_season_lines, minor_season_rows, team_total_rows,
+)
 
 failures = []
 
@@ -95,6 +97,23 @@ cov_debut = {1: date(2021, 5, 1), 2: date(2022, 6, 1), 3: date(2019, 4, 1), 4: d
 check("player without a debut date is skipped, not a crash", debut_coverage(cov_rows, cov_debut, [1, 2, 3, 4, 5, 676601]), (3, 1))
 check("only players in the fetch count", debut_coverage(cov_rows, cov_debut, [1]), (1, 1))
 check("a line in the debut season itself does not count", debut_coverage([{"player_id": 2, "season": 2022}], cov_debut, [2]), (1, 0))
+
+print("team totals (synthetic /teams/stats shape)")
+RESP = {"stats": [{"type": {"displayName": "season"}, "group": {"displayName": "hitting"}, "splits": [
+    {"season": "2019", "team": {"id": 501, "name": "A"}, "sport": {"id": 11},
+     "stat": {"plateAppearances": 5500, "strikeOuts": 1200, "groundOuts": 1300, "airOuts": 1400, "hitByPitch": 60}},
+    {"season": "2019", "team": {"id": 502, "name": "B"},
+     "stat": {"plateAppearances": 5400, "strikeOuts": 1100}},
+    {"season": "2018", "team": {"id": 503}, "stat": {"plateAppearances": 1}},          # wrong season
+    {"season": "2019", "team": {"id": 504}, "sport": {"id": 12}, "stat": {}},            # wrong level
+    {"season": "2019", "stat": {"plateAppearances": 9}},                                 # no team (a league line)
+]}]}
+tt = {r["team_id"]: r for r in team_total_rows(RESP, 2019, 11, "hitting")}
+check("only matching season, level and team rows", sorted(tt), [501, 502])
+check("counting stats mapped", (tt[501]["plate_appearances"], tt[501]["strikeouts"], tt[501]["ground_outs"]), (5500, 1200, 1300))
+check("hit by pitch (hitting key)", tt[501]["hit_by_pitch"], 60)
+check("missing stat is None", tt[502]["ground_outs"], None)
+check("empty response, no rows", team_total_rows({}, 2019, 11, "hitting"), [])
 
 print("FAILED: " + ", ".join(failures) if failures else "all passed")
 sys.exit(1 if failures else 0)
