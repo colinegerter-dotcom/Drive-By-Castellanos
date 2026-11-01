@@ -151,7 +151,7 @@ def _build(inputs, prior, k_league, seasons, out, point):
         priors.PIT_WEIGHTS = dict(tune_priors.PIT_WEIGHTS[prior["pit_weights"]])
         priors.K_PIT = {**priors.K_PIT, "k": prior["pit_k_k"]}
         environment.K_LEAGUE = k_league
-        con, _ = fb.build_features(inputs, seasons, point)
+        con, _ = fb.build_features(inputs, seasons, point, with_umpire=True)  # signed runner: M1u, M1uz need the umpire
         con.execute(f"copy features to '{out}' (format parquet, compression zstd)")
         con.close()
     finally:

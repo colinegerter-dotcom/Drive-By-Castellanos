@@ -3,7 +3,8 @@
 No network, no DB, no data files: tiny hand-built schedules whose lags are
 worked out by hand. Venue ids used: 680 Seattle (Pacific, -7), 3313 New York
 (Eastern, -4), 17 Chicago (Central, -5), 5381 London (international),
-99999 (not in the table).
+99999 (not in the venue table: team_lags skips it, travel_features stops
+the run, since the one venue table of 1 Nov 2026, fixes-2027.md section 3).
 
 Run: python tests/test_travel.py
 """
@@ -101,13 +102,13 @@ mut = lags(rows)
 travel.USE_NEXT_GAME = False
 check("the next-venue mutation changes them (so the leak test can catch it)", [mut[i] for i in (1, 2, 3)] != [full[i] for i in (1, 2, 3)], True)
 
-print("travel_features: own and opposing lag, cancelled game, unknown venue, international")
+print("travel_features: own and opposing lag, cancelled game, international")
 con = duckdb.connect()
 G = [  # game_id, season, date, fp (epoch hours added), venue, home, away, status
     (1, 2022, "2022-06-01", 19, SEA, 10, 20, "completed"),     # team 20 hosts nobody here: team 20 is away at Seattle
     (2, 2022, "2022-06-02", 19, NYY, 30, 20, "completed"),     # team 20 is in New York the next day: lag 3
     (3, 2022, "2022-06-03", 19, NYY, 30, 20, None),            # cancelled: not a game
-    (4, 2022, "2022-06-04", 19, UNK, 40, 20, "completed"),     # unknown venue
+    (4, 2022, "2022-06-04", 19, CHI, 40, 20, "completed"),     # Chicago (game 4 was the unknown venue before 1 Nov 2026)
     (5, 2022, "2022-06-05", 19, LON, 50, 20, "completed"),     # international
 ]
 g = pd.DataFrame([{"game_id": a, "season": b, "date": pd.Timestamp(c).date(), "fp_sched": pd.Timestamp(c) + pd.Timedelta(hours=d),
@@ -121,9 +122,23 @@ check("game 2, away team 20 batting: own lag 3, opposing 0", (res.loc[(2, 20), "
 check("game 2, home team 30 batting: own 0, opposing (team 20) 3", (res.loc[(2, 30), "lag_e_own"], res.loc[(2, 30), "lag_e_opp"]), (0.0, 3.0))
 check("game 2 is not flagged missing", bool(res.loc[(2, 20), "trv_missing"]), False)
 check("cancelled game is flagged missing, lags 0", (bool(res.loc[(3, 20), "trv_missing"]), res.loc[(3, 20), "lag_e_own"]), (True, 0.0))
-check("unknown venue is flagged missing, lags 0", (bool(res.loc[(4, 20), "trv_missing"]), res.loc[(4, 20), "lag_e_own"]), (True, 0.0))
+check("game 4 at Chicago is not flagged missing", bool(res.loc[(4, 20), "trv_missing"]), False)
 check("international game is flagged missing, lags 0", (bool(res.loc[(5, 20), "trv_missing"]), res.loc[(5, 20), "lag_e_own"]), (True, 0.0))
 check("row count: two rows per game", len(res), 10)
+
+print("travel_features: an unknown venue stops the run")
+from pipelines.reference.venues import UnknownVenue  # noqa: E402
+con_u = duckdb.connect()
+gu = g.copy()
+gu.loc[gu.game_id == 4, "venue_id"] = UNK
+con_u.register("gu_df", gu)
+con_u.execute("create table games as select * from gu_df")
+con_u.execute("create table tg as select game_id, home_team bat_team, away_team fld_team from games union all select game_id, away_team, home_team from games")
+try:
+    travel.travel_features(con_u, "tg", "P2")
+    check("unknown venue raises UnknownVenue", False, True)
+except UnknownVenue:
+    check("unknown venue raises UnknownVenue", True, True)
 
 print("Live use: a game later than every completed one is kept and gets its lag")
 con2 = duckdb.connect()

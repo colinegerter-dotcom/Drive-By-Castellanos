@@ -13,8 +13,8 @@ scheduled first pitch, then game id):
   0. Games counted: status completed, plus any game dated after the latest
      completed one (the game being predicted and the days after it, live).
   1. Each venue has a summer UTC offset (TZ_BY_VENUE; ET -4, CT -5, MT -6,
-     PT and Arizona -7). A venue missing from the table is skipped and
-     warned about; the recursion goes on as if that game had not happened.
+     PT and Arizona -7). A venue missing from the table stops the run
+     (since 1 Nov 2026; it used to be skipped with a warning).
   2. The team's body clock B starts each season on its first game's offset.
   3. Before the next game, g calendar days later, B moves toward the NEW
      venue's offset by up to ADAPT_PER_DAY hours for each day spent there:
@@ -24,7 +24,7 @@ scheduled first pitch, then game id):
   4. lag = venue offset - B, clipped to -3..+3. lag_e = max(lag, 0): hours
      of EASTWARD lag. Example: Seattle to New York with no off day gives 3,
      then 2, 1, 0 on the next days; with an off day after the flight, 2.
-  5. Games at international sites (Seoul, Mexico City, London) get
+  5. Games at international sites (Seoul, Tokyo, Mexico City, London) get
      lag_e = 0 and trv_missing true (a 9- or 12-hour change is not a
      3-hour clip); the recursion still runs through them.
 
@@ -40,27 +40,24 @@ their defaults.
 """
 from __future__ import annotations
 
-import sys
 
 import duckdb
 import numpy as np
 import pandas as pd
+
+from pipelines.reference import venues as venue_table
 
 ADAPT_PER_DAY = 1.0     # hours of body-clock shift per day in the new zone (Song et al. 2017)
 CLIP = 3.0              # hours
 COMPLETED = "completed"
 USE_NEXT_GAME = False   # True reads the team's NEXT game as its previous one (mutation only)
 
-ET, CT, MT, PT = -4, -5, -6, -7
-# summer UTC offset by MLB venue id (every regular-season date falls in daylight
-# time; Arizona has none and so matches Pacific summer time)
-TZ_BY_VENUE = {
-    1: PT, 2: ET, 3: ET, 4: CT, 5: ET, 7: CT, 10: PT, 12: ET, 14: ET, 15: PT, 17: CT, 19: MT,
-    22: PT, 31: ET, 32: CT, 680: PT, 2392: CT, 2394: ET, 2395: PT, 2536: ET, 2602: ET,
-    2680: PT, 2681: ET, 2735: ET, 2756: ET, 2889: CT, 3289: ET, 3309: ET, 3312: CT,
-    3313: ET, 3949: CT, 4169: ET, 4705: ET, 5150: 9, 5325: CT, 5340: -6, 5381: 1, 5445: CT,
-}
-INTERNATIONAL = {5150, 5340, 5381}     # Seoul, Mexico City, London
+# Summer UTC offset and international sites by MLB venue id, from the one
+# venue table pipelines/reference/venues.csv (fixes-2027.md section 3). Every
+# regular-season date falls in daylight time; Arizona has none and so matches
+# Pacific summer time.
+TZ_BY_VENUE = venue_table.utc_offsets()
+INTERNATIONAL = venue_table.international_ids()
 
 
 def team_lags(sched: pd.DataFrame) -> pd.DataFrame:
@@ -106,10 +103,8 @@ def travel_features(con: duckdb.DuckDBPyConnection, keys: str = "tg", point: str
            or date > (select max(date) from games where status = '{COMPLETED}')
     """).fetchdf()
     g["date"] = pd.to_datetime(g["date"])
-    unknown = sorted(set(g.venue_id) - set(TZ_BY_VENUE))
-    if unknown:
-        print(f"warning: venue id(s) {unknown} have no time zone in travel.py; those games are skipped "
-              f"and their travel features are 0 (add them to TZ_BY_VENUE)", file=sys.stderr)
+    # an unknown venue stops the run (fixes-2027.md section 3); it used to be skipped with a warning
+    venue_table.require_known(g.venue_id)
     sched = pd.concat([g.assign(team=g.home_team), g.assign(team=g.away_team)], ignore_index=True)
     lags = team_lags(sched[["game_id", "season", "date", "fp_sched", "venue_id", "team"]])
     con.register("trv_lag_df", lags)

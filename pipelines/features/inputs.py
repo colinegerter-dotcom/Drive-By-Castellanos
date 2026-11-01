@@ -28,13 +28,15 @@ from pathlib import Path
 
 import duckdb
 
-# Venues with a roof (retractable or fixed), by MLB venue id. Same list as
-# pipelines/config.py ROOFED_VENUE_IDS; repeated here so the feature builder
-# has no import-time dependency on database settings.
-ROOFED_VENUE_IDS = {32, 15, 2392, 5325, 4169, 14, 680, 12}
-# Fixed dome: the roof is always closed, so weather never matters there.
-# 12 = Tropicana Field. Every other id above has a retractable roof.
-DOME_VENUE_IDS = {12}
+from pipelines.reference.venues import dome_ids, roofed_ids
+
+# Venues with a roof (retractable or fixed) and fixed domes, by MLB venue id,
+# from the one venue table pipelines/reference/venues.csv (fixes-2027.md
+# section 3). venues.py has no database dependency, so the feature builder
+# still has none at import time. Domes: the roof is always closed, so
+# weather never matters there (Tropicana Field, Tokyo Dome, Gocheok Sky Dome).
+ROOFED_VENUE_IDS = roofed_ids()
+DOME_VENUE_IDS = dome_ids()
 
 
 def connect(folder: str | Path, seasons: list[int] | None = None) -> duckdb.DuckDBPyConnection:

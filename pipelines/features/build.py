@@ -9,6 +9,16 @@ Targets (runs_f5, runs_8, runs_total) ride along for convenience; they are
 outcomes, never inputs, and every feature column is listed in
 FEATURE_COLUMNS so a model can't pick up a target by accident.
 
+Umpire (fixes-2027.md section 2, decided 1 Nov 2026): the 2027 model has
+no umpire feature, so by default the plate umpire (E14) and catcher framing
+(E18, which needs the umpire grid) are not built and their columns are not
+in the output. --with-umpire rebuilds them, only to reproduce the signed
+2025-2026 feature files (M1u, M1uz); the tag prereg-2025-runner is the
+reference for those.
+
+Venues (fixes-2027.md section 3): every game's venue id must be in
+pipelines/reference/venues.csv, or the build stops.
+
 Cutoff: a game's features use only games whose data date is before the
 game's date (P1, 10am game day, and P2, confirmed lineups). A same-day
 doubleheader game 1 is NOT used for game 2 yet; that is allowed at P2 by
@@ -21,6 +31,8 @@ import json
 from pathlib import Path
 
 import duckdb
+
+from pipelines.reference.venues import require_known
 
 from . import contact, environment, events, framing, inputs, lineup, park_hand, pitching, priors, rookie, stuff, travel, umpire, wind
 
@@ -40,14 +52,15 @@ BASELINE_COLUMNS = ["team_off_f5", "team_off_8", "team_def_f5", "team_def_8"]
 TARGET_COLUMNS = ["runs_f5", "runs_8", "runs_total"]
 
 
-def build_features(folder: str | Path, seasons: list[int], point: str = "P2") -> tuple[duckdb.DuckDBPyConnection, dict]:
+def build_features(folder: str | Path, seasons: list[int], point: str = "P2",
+                   with_umpire: bool = False) -> tuple[duckdb.DuckDBPyConnection, dict]:
     """Returns the DuckDB connection holding table `features`, and build
     notes (fitted coefficients, counts) worth saving next to the output."""
     con = inputs.connect(folder)
     events.build_pa(con)
     events.build_appearances(con)
     priors.build_player_seasons(con)
-    notes: dict = {"point": point, "seasons": seasons}
+    notes: dict = {"point": point, "seasons": seasons, "with_umpire": with_umpire}
     # round 2 group 8 (design E19): rookies' starting values from the minors;
     # must exist before any hitter_rates / pitcher_rates call
     notes["rookie"] = rookie.build_rookie_adj(con)
@@ -66,6 +79,8 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
         where g.season in ({season_list})
           and g.game_type in ('R', 'F', 'D', 'L', 'W')
     """)
+    # an unknown venue stops the build (fixes-2027.md section 3)
+    require_known(r[0] for r in con.execute("select distinct venue_id from tg").fetchall())
 
     # ---- fitted pieces (on the 2021 warm-up season) ----
     skill = pitching.fit_skill(con)
@@ -157,8 +172,9 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     # ---- round 2 group 3: wind (design E12; park-centred version E13) ----
     wind.wind_features(con, "tg", point)
 
-    # ---- round 2 group 4: plate umpire (design E14) ----
-    notes["umpire"] = umpire.umpire_features(con, "tg", point)
+    # ---- round 2 group 4: plate umpire (design E14); dropped for 2027, legacy builds only ----
+    if with_umpire:
+        notes["umpire"] = umpire.umpire_features(con, "tg", point)
 
     # ---- round 2 group 5: pitch movement, as a stuff score (design E16) ----
     notes["stuff"] = stuff.stuff_features(con, "tg")
@@ -166,8 +182,10 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
     # ---- round 2 group 6: travel and rest, as eastward body-clock lag (design E17) ----
     notes["travel"] = travel.travel_features(con, "tg", point)
 
-    # ---- round 2 group 7: catcher framing (design E18); needs ump_taken and ump_grid from group 4 ----
-    notes["framing"] = framing.framing_features(con, "tg", point)
+    # ---- round 2 group 7: catcher framing (design E18); needs ump_taken and ump_grid from group 4,
+    #      so it is built only with the umpire (legacy builds) ----
+    if with_umpire:
+        notes["framing"] = framing.framing_features(con, "tg", point)
 
     # ---- assemble ----
     tto = pitching.TTO3_RUNS_PER_PA
@@ -180,6 +198,12 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
                + s.tto3_pa_{sfx} * {tto}
                + ({spa} - s.sp_pa_{sfx}) * coalesce(p.pen_skill_{sfx}, s.mu_skill)) / {spa}
               as pitching_composite_{sfx}""")
+    ump_cols = "um.ump_cs, um.ump_missing," if with_umpire else ""
+    frm_cols = "fr.frm_runs_opp, fr.frm_missing," if with_umpire else ""
+    ump_join = ("left join ump_feat um on um.game_id = q.game_id and um.bat_team = q.bat_team"
+                if with_umpire else "")
+    frm_join = ("left join frm_feat fr on fr.game_id = q.game_id and fr.bat_team = q.bat_team"
+                if with_umpire else "")
     con.execute(f"""
         create or replace table features as
         select q.game_id, q.season, q.date, q.game_type, q.bat_team, q.fld_team, q.is_home, q.sp_id, q.resumed,
@@ -196,10 +220,10 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
                coalesce(pk.pk_hr, 0.0) as pk_hr, coalesce(pk.pk_hit, 0.0) as pk_hit,
                wd.wind_out, wd.wind_in, wd.wind_out_wrig, wd.wind_in_wrig, wd.wind_missing,
                wd.wind_out_c, wd.wind_in_c, wd.wind_out_wrig_c, wd.wind_in_wrig_c, wd.wind_c_missing,
-               um.ump_cs, um.ump_missing,
+               {ump_cols}
                sf.sp_stuff, sf.pen_stuff_8,
                tv.lag_e_own, tv.lag_e_opp, tv.trv_missing,
-               fr.frm_runs_opp, fr.frm_missing,
+               {frm_cols}
                e.park_factor, e.new_park, e.temp_f, e.temp_missing, e.roof_park,
                e.league_env_f5, e.league_env_8,
                e.team_off_f5, e.team_off_8, e.team_def_f5, e.team_def_8,
@@ -212,10 +236,10 @@ def build_features(folder: str | Path, seasons: list[int], point: str = "P2") ->
         left join ct_feat ct on ct.game_id = q.game_id and ct.bat_team = q.bat_team
         left join pk_feat pk on pk.game_id = q.game_id and pk.bat_team = q.bat_team
         left join wind_feat wd on wd.game_id = q.game_id and wd.bat_team = q.bat_team
-        left join ump_feat um on um.game_id = q.game_id and um.bat_team = q.bat_team
+        {ump_join}
         left join stuff_feat sf on sf.game_id = q.game_id and sf.bat_team = q.bat_team
         left join trv_feat tv on tv.game_id = q.game_id and tv.bat_team = q.bat_team
-        left join frm_feat fr on fr.game_id = q.game_id and fr.bat_team = q.bat_team
+        {frm_join}
         left join team_runs t on t.game_id = q.game_id and t.team_id = q.bat_team
         order by q.game_id, q.is_home
     """)
@@ -229,9 +253,12 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--seasons", default="2021,2022,2023,2024,2025,2026")
     ap.add_argument("--point", default="P2")
+    ap.add_argument("--with-umpire", action="store_true",
+                    help="also build the dropped umpire (E14) and framing (E18) features, to reproduce the "
+                         "signed 2025-2026 feature files; never for the 2027 model")
     a = ap.parse_args()
     seasons = [int(s) for s in a.seasons.split(",")]
-    con, notes = build_features(a.inputs, seasons, a.point)
+    con, notes = build_features(a.inputs, seasons, a.point, with_umpire=a.with_umpire)
     con.execute(f"copy features to '{a.out}' (format parquet, compression zstd)")
     Path(a.out).with_suffix(".notes.json").write_text(json.dumps(notes, indent=2, default=str))
     print(json.dumps({k: v for k, v in notes.items() if k != "slot_weights"}, indent=2, default=str))

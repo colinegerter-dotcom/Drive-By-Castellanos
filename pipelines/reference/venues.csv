@@ -1,0 +1,44 @@
+venue_id,name,other_names,lat,lon,utc_offset_summer,roof,bearing,international,seasons,notes
+1,Angel Stadium,,33.80019044,-117.8823996,-7,open,30,0,2021-2026,"Bearing estimated from satellite imagery, lower confidence (renovation)"
+2,Oriole Park at Camden Yards,,39.283787,-76.621689,-4,open,358,0,2021-2026,
+3,Fenway Park,,42.346456,-71.097441,-4,open,42,0,2021-2026,
+4,Rate Field,Guaranteed Rate Field,41.83,-87.634167,-5,open,186,0,2021-2026,"Bearing (S) unusual, not verified against a second source"
+5,Progressive Field,,41.495861,-81.685255,-4,open,2,0,2021-2026,
+7,Kauffman Stadium,,39.051567,-94.480483,-5,open,13,0,2021-2026,
+10,Oakland Coliseum,,37.751511,-122.200698,-7,open,,0,2021-2024,No bearing researched; Athletics left after 2024
+12,Tropicana Field,,27.767778,-82.6525,-4,dome,,0,"2021-2024,2026",Fixed dome; Rays played 2025 at George M. Steinbrenner Field
+14,Rogers Centre,,43.64155,-79.38915,-4,retractable,,0,2021-2026,
+15,Chase Field,,33.445302,-112.066687,-7,retractable,,0,2021-2026,"Arizona has no daylight time, so its summer offset matches Pacific"
+17,Wrigley Field,,41.948171,-87.655503,-5,open,30,0,2021-2026,
+19,Coors Field,,39.756042,-104.994136,-6,open,342,0,2021-2026,
+22,UNIQLO Field at Dodger Stadium,Dodger Stadium,34.07368,-118.24053,-7,open,32,0,2021-2026,
+31,PNC Park,,40.446904,-80.005753,-4,open,117,0,2021-2026,
+32,American Family Field,Miller Park,43.02838,-87.97099,-5,retractable,295,0,2021-2026,Bearing low confidence; unused while the park counts as roofed
+680,T-Mobile Park,Safeco Field,47.591333,-122.33251,-7,retractable,12,0,2021-2026,Bearing unused while the park counts as roofed
+2392,Daikin Park,Minute Maid Park,29.756967,-95.355509,-5,retractable,,0,2021-2026,
+2394,Comerica Park,,42.3391151,-83.048695,-4,open,141,0,2021-2026,"Bearing (SE) unusual, not verified against a second source"
+2395,Oracle Park,,37.778383,-122.389448,-7,open,60,0,2021-2026,
+2397,Tokyo Dome,,35.7056,139.7519,9,dome,,1,2025,International; fixed dome
+2523,George M. Steinbrenner Field,,27.97997,-82.50702,-4,open,,0,2025,Rays 2025 stopgap home; no bearing researched
+2529,Sutter Health Park,,38.57994,-121.51246,-7,open,14,0,2025-2026,Athletics' temporary home through 2027
+2536,TD Ballpark,,27.9745812,-82.7913301,-4,open,,0,2021,Blue Jays 2021 temporary home
+2602,Great American Ball Park,,39.097389,-84.506611,-4,open,10,0,2021-2026,
+2680,Petco Park,,32.707861,-117.157278,-7,open,350,0,2021-2026,
+2681,Citizens Bank Park,,39.90539086,-75.16716957,-4,open,340,0,2021-2026,
+2735,Journey Bank Ballpark,BB&T Ballpark|Muncy Bank Ballpark,41.2419845,-77.0475104,-4,open,,0,2021-2026,"Little League Classic, Williamsport"
+2756,Sahlen Field,,42.880772,-78.873955,-4,open,,0,2021,Blue Jays 2021 temporary home
+2889,Busch Stadium,,38.62256667,-90.19286667,-5,open,37,0,2021-2026,
+3289,Citi Field,,40.75753012,-73.84559155,-4,open,337,0,2021-2026,
+3309,Nationals Park,,38.872861,-77.007501,-4,open,2,0,2021-2026,
+3312,Target Field,,44.981829,-93.277891,-5,open,344,0,2021-2026,
+3313,Yankee Stadium,,40.82919482,-73.9264977,-4,open,33,0,2021-2026,
+3949,Rickwood Field,,33.5023303,-86.8563555,-5,open,,0,2024,One-off neutral site
+4169,loanDepot park,Marlins Park,25.77796236,-80.21951795,-4,retractable,,0,2021-2026,
+4705,Truist Park,,33.890672,-84.467641,-4,open,152,0,2021-2026,
+5150,Gocheok Sky Dome,,37.4982,126.867,9,dome,,1,2024,International; fixed dome
+5325,Globe Life Field,,32.747299,-97.081818,-5,retractable,,0,2021-2026,
+5340,Estadio Alfredo Harp Helu,,19.4047,-99.0876,-6,open,,1,"2023-2024,2026",International; Mexico City has no daylight time
+5355,Las Vegas Ballpark,,36.152607,-115.329888,-7,open,,0,2026,6 regular-season games in 2026
+5381,London Stadium,,51.5383,-0.0166,1,open,,1,2023-2024,"International. Coordinates corrected from central London (database: 51.50853, -0.12574) to Stratford; to verify against a map"
+5445,Field of Dreams,,42.498241,-91.056486,-5,open,,0,"2021-2022,2026",One-off neutral site
+6130,Bristol Motor Speedway,,36.5157,-82.257,-4,open,,0,2025,"One-off neutral site. Coordinates corrected from a point in Georgia (database: 31.5156, -82.5269) to Bristol, Tennessee; to verify against a map"

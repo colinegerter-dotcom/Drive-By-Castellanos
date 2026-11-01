@@ -12,7 +12,7 @@ which depends on the park's direction:
 speed in mph and direction (the bearing the wind blows FROM) are the
 observed game-time conditions (table `conditions`, Open-Meteo, the hour of
 first pitch); the park bearing is home plate to center field, from
-pipelines/reference/park_orientation.csv (copied below by venue id).
+pipelines/reference/venues.csv (by venue id).
 
 E12 features, the same for both team rows of a game:
   wind_out        outward part, 0 to 12 mph (capped: moderate wind out adds
@@ -59,33 +59,15 @@ LAG = 1               # most recent season used = target season - LAG. Must be
                       # 1; the leak test's mutation check sets 0 (same season)
 MIN_PRIOR_GAMES = 40  # games with a reading needed for a park average (E13)
 
-# Home plate to center field bearing (degrees), from park_orientation.csv,
-# by MLB venue id, for open-air parks used 2021-2026. Left out on purpose:
-# roofed parks (wind is forced to 0), Oakland Coliseum (venue 10; not in the
-# orientation file), and spring, temporary and one-off neutral sites.
-BEARING = {
-    1: 30,      # Angel Stadium
-    2: 358,     # Oriole Park at Camden Yards
-    3: 42,      # Fenway Park
-    4: 186,     # Guaranteed Rate Field / Rate Field (flagged unverified)
-    5: 2,       # Progressive Field
-    7: 13,      # Kauffman Stadium
-    17: 30,     # Wrigley Field
-    19: 342,    # Coors Field
-    22: 32,     # Dodger Stadium
-    31: 117,    # PNC Park
-    2394: 141,  # Comerica Park (flagged unverified)
-    2395: 60,   # Oracle Park
-    2602: 10,   # Great American Ball Park
-    2680: 350,  # Petco Park
-    2681: 340,  # Citizens Bank Park
-    2889: 37,   # Busch Stadium
-    3289: 337,  # Citi Field
-    3309: 2,    # Nationals Park
-    3312: 344,  # Target Field
-    3313: 33,   # Yankee Stadium
-    4705: 152,  # Truist Park
-}
+# Home plate to center field bearing (degrees) by MLB venue id, for open-air
+# parks where it was researched, from the one venue table
+# pipelines/reference/venues.csv (fixes-2027.md section 3). Left out: roofed
+# parks (wind is forced to 0) and parks with no researched bearing (Oakland
+# Coliseum, Steinbrenner Field, temporary and one-off neutral sites). Since
+# 1 Nov 2026 this includes Sutter Health Park (14), which the old copy missed.
+from pipelines.reference.venues import open_air_bearings  # noqa: E402
+
+BEARING = open_air_bearings()
 
 
 def _capped(out: str) -> str:

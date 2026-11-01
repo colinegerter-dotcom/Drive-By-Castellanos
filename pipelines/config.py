@@ -99,19 +99,13 @@ ROOFED_PARKS = {
     "Tropicana Field",  # Rays -- fixed dome
 }
 
-# Same parks by MLB venue id (verified against the schedule feed 24 Sep 2026:
-# each id carried both its old and new name across 2018-2026). Ids survive
+# Same parks by MLB venue id. Since 1 Nov 2026 (fixes-2027.md section 3) this
+# comes from the one venue table, pipelines/reference/venues.csv, which also
+# lists the international domes (Tokyo Dome, Gocheok Sky Dome). Ids survive
 # renames, so this is the set to check whenever a venue id is available.
-ROOFED_VENUE_IDS = {
-    32,    # American Family Field / Miller Park -- Brewers
-    15,    # Chase Field -- Diamondbacks
-    2392,  # Daikin Park / Minute Maid Park -- Astros
-    5325,  # Globe Life Field -- Rangers
-    4169,  # loanDepot park / Marlins Park -- Marlins
-    14,    # Rogers Centre -- Blue Jays
-    680,   # T-Mobile Park / Safeco Field -- Mariners
-    12,    # Tropicana Field -- Rays (fixed dome)
-}
+from pipelines.reference.venues import roofed_ids as _roofed_ids  # noqa: E402
+
+ROOFED_VENUE_IDS = _roofed_ids()
 
 # ---------------------------------------------------------------------------
 # Database connection
